@@ -1,6 +1,6 @@
 # Data-processing-tool-for-biomechanics
 Data processing tool for biomechanics.\
-TODO.\
+TODO.
 1. Detect and filter outliers.
 2. Apply various filters and visualize.
 3. Normalization tool.
