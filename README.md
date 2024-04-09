@@ -5,7 +5,7 @@ TODO.
 Identify and filter out anomalies or outliers from the given data.
 
 3. Apply various filters and visualize:
-Apply different filters to the data to remove noise or emphasize specific patterns.
+Apply different filters to the data to remove noise or emphasize specific patterns.\
 Utilize visualization tools to represent the processed data in graphs or charts.
 
 4. Normalization tool:
