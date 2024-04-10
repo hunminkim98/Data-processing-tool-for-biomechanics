@@ -10,9 +10,7 @@ from tkinter import messagebox
 
 ## AUTHORSHIP INFORMATION
 __author__ = "Hun Min Kim"
-__version__ = "0.1"
 __email__ = "gns5758@inha.edu"
-__status__ = "Development"
 
 ## Functions
 def browse_folder():
