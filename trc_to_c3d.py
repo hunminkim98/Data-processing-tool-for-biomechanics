@@ -1,147 +1,73 @@
+"""
+Extracts marker data from a TRC file and creates a corresponding C3D file.
+
+Usage:
+    python trc_to_c3d.py --trc_path <path_to_trc_file> --f <frame_rate>
+
+--trc_path: Path to the TRC file.
+--f: Frame rate of the 3D data.
+c3d file will be saved in the same directory as the TRC file with the same name.
+
+"""
+
 import os
+import argparse
 import numpy as np
 import pandas as pd
 import c3d
-from c3d import DataTypes
-import glob
-import toml
-import struct
 
-## AUTHORSHIP INFORMATION
-__author__ = "Hun Min Kim"
-__email__ = "gns5758@inha.edu"
+def extract_marker_data(trc_file):
+    with open(trc_file, 'r') as file:
+        lines = file.readlines()
+        marker_names_line = lines[3]
+        marker_names = marker_names_line.strip().split('\t')[2::3]
 
-def load_config(config_file):
-    with open(config_file, 'r') as f:
-        config = toml.load(f)
-    return config
+    trc_data = pd.read_csv(trc_file, sep='\t', skiprows=5)
+    marker_coords = trc_data.iloc[:, 2:].to_numpy().reshape(-1, len(marker_names), 3)
+    # marker_coords = np.nan_to_num(marker_coords, nan=0.0)
+    marker_coords *= 1000  # Convert from meters to millimeters
 
-def trc_to_c3d(config_dict):
-    # Read config
-    project_dir = os.path.realpath(config_dict.get('project').get('project_dir'))
-    print(f"Project directory: {project_dir}")
-    frame_rate = config_dict.get('project').get('frame_rate')
-    print(f"Frame rate: {frame_rate}")
+    return marker_names, marker_coords
 
-    # Get the last folder name of project_dir
-    last_folder_name = os.path.basename(project_dir)
-    print(f"Last folder name: {last_folder_name}")
+def create_c3d_file(trc_file, marker_names, marker_coords, frame_rate):
+    writer = c3d.Writer(point_rate=frame_rate, analog_rate=0, point_scale=1.0, point_units='mm', gen_scale=-1.0)
+    writer.set_point_labels(marker_names)
+    
+    markers_group = writer.point_group
 
-    pose3d_dir = os.path.join(project_dir, 'pose-3d')
-    print(f"pose3d_dir: {pose3d_dir}")
+    for frame in marker_coords:
+        residuals = np.full((frame.shape[0], 1), 0.0)
+        cameras = np.zeros((frame.shape[0], 1))
+        points = np.hstack((frame, residuals, cameras))
+        writer.add_frames([(points, np.array([]))])
 
-    # Determine the .trc file name to read
-    trc_files = []
-    if config_dict.get('triangulation').get('save_to_c3d'):
-        trc_pattern = f"{last_folder_name}_*.trc"
-        trc_files = glob.glob(os.path.join(pose3d_dir, trc_pattern))
-        print(f"Successfully read {trc_files}, caused by save_to_c3d = True in triangulation.")
-    elif config_dict.get('filtering').get('save_to_c3d'):
-        trc_pattern = f"{last_folder_name}*_filt_*.trc"
-        trc_files = glob.glob(os.path.join(pose3d_dir, trc_pattern))
-        print(f"Successfully read {trc_files}, caused by save_to_c3d = True in filtering.")
-    else:
-        print("No valid save_to_c3d configuration found.")
+    writer.set_start_frame(1)
+    writer._set_last_frame(len(marker_coords))
+
+    c3d_file_path = trc_file.replace('.trc', '.c3d')
+    with open(c3d_file_path, 'wb') as handle:
+        writer.write(handle)
+    print(f"Successfully created c3d file.")
+
+def trc_to_c3d(trc_file, frame_rate):
+    marker_names, marker_coords = extract_marker_data(trc_file)
+    create_c3d_file(trc_file, marker_names, marker_coords, frame_rate)
+
+def main():
+    parser = argparse.ArgumentParser(description='Convert TRC files to C3D files.')
+    parser.add_argument('--trc_path', type=str, required=True, help='Path to the TRC file')
+    parser.add_argument('--f', type=int, required=True, help='Frame rate')
+
+    args = parser.parse_args()
+
+    trc_file = args.trc_path
+    frame_rate = args.f
+
+    if not os.path.isfile(trc_file):
+        print(f"Error: {trc_file} does not exist.")
         return
 
-    print(f"Read trc files: {[os.path.basename(file) for file in trc_files]}")
-
-    for trc_file in trc_files:
-        # Extract marker names from the 4th row of the TRC file
-        with open(os.path.join(pose3d_dir, trc_file), 'r') as file:
-            lines = file.readlines()
-            marker_names_line = lines[3]
-            marker_names = marker_names_line.strip().split('\t')[2::3]
-            print(f"Marker names: {marker_names}")
-
-        # Read the data frame (skiprows=5)
-        trc_data = pd.read_csv(os.path.join(pose3d_dir, trc_file), sep='\t', skiprows=5)
-
-        # Extract marker coordinates
-        marker_coords = trc_data.iloc[:, 2:].to_numpy().reshape(-1, len(marker_names), 3)
-        marker_coords = np.nan_to_num(marker_coords, nan=0.0)
-
-        # scale_factor = 100
-        # marker_coords = marker_coords * scale_factor
-
-        # Create a C3D writer
-        writer = c3d.Writer(point_rate=frame_rate, analog_rate=0, point_scale=1.0, point_units='m', gen_scale=1.0)
-
-        # Add marker parameters
-        writer.set_point_labels(marker_names)
-
-        # Add marker descriptions (optional)
-        marker_descriptions = [''] * len(marker_names)
-        writer.point_group.add_param('DESCRIPTIONS', desc='Marker descriptions', 
-                                    bytes_per_element=-1, dimensions=[len(marker_names)], 
-                                    bytes=np.array(marker_descriptions, dtype=object))
-        
-        # Set the data start parameter
-        data_start = writer.header.data_block
-        writer.point_group.add_param('DATA_START', desc='Data start parameter',
-                                    bytes_per_element=2, dimensions=[], bytes=struct.pack('<H', data_start))
-        
-        # Create a C3D group for markers
-        markers_group = writer.point_group
-
-        # Add frame data
-        for frame in marker_coords:
-            # Add residual and camera columns
-            residuals = np.full((frame.shape[0], 1), 0.0)  # Set residuals to 0.0
-            cameras = np.zeros((frame.shape[0], 1))  # Set cameras to 0
-            points = np.hstack((frame, residuals, cameras))
-            writer.add_frames([(points, np.array([]))])
-
-        # Set the trial start and end frames
-        writer.set_start_frame(1)
-        writer._set_last_frame(len(marker_coords))
-
-        # Write the C3D file
-        c3d_file_path = trc_file.replace('.trc', '.c3d')
-        with open(os.path.join(pose3d_dir, c3d_file_path), 'wb') as handle:
-            writer.write(handle)
-        print(f"C3D file saved to: {c3d_file_path}")
-
-
-        # # Reshape the marker coordinates and add empty analog data
-        # num_frames = len(marker_coords)
-        # num_markers = marker_coords.shape[1]
-        # frames_data = marker_coords.reshape(num_frames, num_markers, 3)
-        # frames_data = np.concatenate((frames_data, np.zeros((num_frames, num_markers, 2))), axis=2)
-        # print(f"frames_data: {frames_data}")
-
-        # # Add frame data
-        # for frame in frames_data:
-        #     writer.add_frames([(frame, np.array([]))])
-
-        # # # Add frame data
-
-        # # Write the C3D file
-        # c3d_file_path = trc_file.replace('.trc', '.c3d')
-        # with open(os.path.join(pose3d_dir, c3d_file_path), 'wb') as handle:
-        #     writer.write(handle)
-        # print(f"C3D file saved to: {c3d_file_path}")
+    trc_to_c3d(trc_file, frame_rate)
 
 if __name__ == '__main__':
-    config_file = 'config.toml'
-    config = load_config(config_file)
-    trc_to_c3d(config)
-
-
-        # markers_group = c3d.Group(name='MARKERS', dtypes=-1)
-        # writer.add_group(group_id=0, name='MARKERS', desc='Markers data')
-            # Create a C3D parameter for marker names
-        # max_length = max([len(name) for name in marker_names])
-        # labels_param = c3d.Param('LABELS', '', -1, [max_length, len(marker_names)])
-        # labels_param.set_string_array(marker_names)
-        # markers_group.add_param(labels_param)
-
-        # max_length = max([len(name) for name in marker_names])
-        # labels_param = c3d.Param(name='LABELS', dtype=DataTypes.CHAR, dimensions=[max_length, len(marker_names)])
-        # labels_param.string_array[:] = marker_names
-        # markers_group.add_parameter(labels_param)
-        # # Reshape the marker coordinates and add empty analog data
-        # num_frames = len(marker_coords)
-        # num_markers = marker_coords.shape[1]
-        # frames_data = marker_coords.reshape(num_frames, num_markers * 3)
-        # frames_data = np.hstack((frames_data, np.zeros((frames_data.shape[0], 1))))
+    main()
