@@ -8,6 +8,10 @@ from tkinter.filedialog import askdirectory
 import numpy as np
 import matplotlib.pyplot as plt
 
+## AUTHORSHIP INFORMATION
+__author__ = "Hun Min Kim"
+__email__ = "gns5758@inha.edu"
+
 def process_file_starting(file_path, start_row, start_col, header_rows, header_cols):
     workbook = openpyxl.load_workbook(file_path)
     sheet = workbook.active
