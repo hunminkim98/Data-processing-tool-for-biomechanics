@@ -16,6 +16,11 @@ import numpy as np
 import pandas as pd
 import c3d
 
+## AUTHORSHIP INFORMATION
+__author__ = "Hun Min Kim"
+__email__ = "gns5758@inha.edu"
+
+
 def extract_marker_data(trc_file):
     with open(trc_file, 'r') as file:
         lines = file.readlines()
