@@ -7,6 +7,10 @@ import glob
 import toml
 import struct
 
+## AUTHORSHIP INFORMATION
+__author__ = "Hun Min Kim"
+__email__ = "gns5758@inha.edu"
+
 def load_config(config_file):
     with open(config_file, 'r') as f:
         config = toml.load(f)
