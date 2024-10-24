@@ -6,22 +6,22 @@ from pathlib import Path
 def read_data_from_csv(file_path):
     """
     CSV 파일에서 데이터와 헤더를 함께 읽어오는 함수
-    
+
     Args:
         file_path (str): CSV 파일 경로
-        
+
     Returns:
         tuple: (헤더, 데이터)
     """
     # 헤더 읽기 (첫 7줄)
     with open(file_path, 'r') as f:
         header_lines = ''.join([f.readline() for _ in range(7)])
-    
+
     # 데이터 읽기
     data = pd.read_csv(file_path, skiprows=7)
-    data = data.iloc[:, 2:] # 첫 2열(frame, time) 제외
-    
+
     return header_lines, data
+
 
 def resample_data(data, original_hz, target_hz):
     """
@@ -54,7 +54,7 @@ def resample_data(data, original_hz, target_hz):
 def save_resampled_data(header_lines, resampled_data, save_path, target_hz):
     """
     리샘플링된 데이터를 CSV 파일로 저장하는 함수
-    
+
     Args:
         header_lines (str): 원본 파일의 헤더
         resampled_data (pd.DataFrame): 리샘플링된 데이터
@@ -65,13 +65,15 @@ def save_resampled_data(header_lines, resampled_data, save_path, target_hz):
     frame = np.arange(1, len(resampled_data) + 1)
     # 시간 계산 (초 단위)
     time = (frame - 1) / target_hz
-    # 데이터프레임에 프레임과 시간 열 삽입
-    resampled_data.insert(0, 'time', time)
-    resampled_data.insert(0, 'frame', frame)
     
+    # Frame과 Time (Seconds) 열의 값을 새로 계산된 값으로 교체
+    resampled_data['Frame'] = frame
+    resampled_data['Time (Seconds)'] = time
+
     with open(save_path, 'w', newline='') as f:
         f.write(header_lines)
-        resampled_data.to_csv(f, index=False, lineterminator='\n')  # line_terminator를 lineterminator로 수정
+        resampled_data.to_csv(f, index=False, lineterminator='\n')
+
 
 def process_folder(parent_folder_path, original_hz, target_hz):
     """
@@ -109,7 +111,7 @@ def process_folder(parent_folder_path, original_hz, target_hz):
 
 def main():
     # 사용자 입력
-    parent_folder = r'C:\Users\gns15\OneDrive\Desktop\Exported_csv (1)'
+    parent_folder = r'C:\Users\gns15\OneDrive\Desktop\Exported_csv (1)\test'
     original_hz = 240
     target_hz = 120
     
