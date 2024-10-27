@@ -91,7 +91,7 @@ def read_and_apply_offset_target_from_xlsx(xlsx_file_path, offset):
         # 오프셋 적용
         if offset < 0:
             # 음수 오프셋: 데이터를 뒤에서 자름
-            data = data.iloc[abs(offset):]
+            data = data.iloc[abs(offset)-1:]
         else:
             # 양수 오프셋: 데이터 앞에 빈 행 추가
             empty_rows = pd.DataFrame(np.nan, index=range(offset), columns=data.columns)
@@ -279,47 +279,67 @@ def visualize_euclidean_distance(csv_distances, trc_distances, optimal_offset, m
             transform=ax2.transAxes, fontsize=10,
             verticalalignment='top')
     plt.tight_layout()
-    plt.show(block=False)  # block=False로 설정하여 비동기적으로 표시
-    plt.pause(2)  # 2초 동안 대기
-    plt.close()  # 2초 후 자동으로 닫기
+    plt.show()
+    # plt.show(block=False)  # block=False로 설정하여 비동기적으로 표시
+    # plt.pause(2)  # 2초 동안 대기
+    # plt.close()  # 2초 후 자동으로 닫기
 
 
-# Compute correlation coefficient and find optimal offset
-def find_optimal_offset(csv_distances, trc_distances):
-    """
-    CSV와 TRC 데이터 간의 최적 오프셋을 찾는 함수
+def find_peak_position(distances):
+    threshold_factor = 1
+    # 임계값 설정: 평균의 threshold_factor 배수
+    threshold = np.mean(distances) * threshold_factor*1.5
 
-    Args:
-        csv_distances (list): CSV 데이터의 유클리디안 거리 리스트
-        trc_distances (list): TRC 데이터의 유클리디안 거리 리스트
+    # 임계값을 초과하는 첫 번째 위치 찾기
+    for i, value in enumerate(distances):
+        if i >= 60 and value > threshold:
+            return i
 
-    Returns:
-        tuple: (최적 오프셋, 최대 상관계수)
-    """
+def find_optimal_offset(csv_distances, trc_distances, window_size=240):
     max_corr = -1
     optimal_offset = 0
 
-    # 더 짧은 데이터의 길이를 기준으로 검사 범위 설정
-    min_length = min(len(csv_distances), len(trc_distances))
-    max_offset = min_length
+    # 각 데이터에서 피크 위치 찾기
+    csv_peak = find_peak_position(csv_distances)
+    print(f"CSV 피크 위치: {csv_peak}")
+    trc_peak = find_peak_position(trc_distances)
+    print(f"TRC 피크 위치: {trc_peak}")
 
-    # 양수, 음수 오프셋에 대해 상관계수 계산
-    for offset in range(-max_offset, max_offset+1):
-        if offset < 0:
-            # CSV 데이터를 뒤로 이동
-            csv_slice = csv_distances[abs(offset):min_length]
-            trc_slice = trc_distances[:len(csv_slice)]
-        else:
-            # CSV 데이터를 앞으로 이동
-            csv_slice = csv_distances[:min_length-offset]
-            trc_slice = trc_distances[offset:offset+len(csv_slice)]
+    # 초기 오프셋 설정 (두 피크를 일치시키기 위해)
+    initial_offset = trc_peak - csv_peak
 
-        if len(csv_slice) > min_length * 0.5:  # 최소 50% 이상의 데이터가 있을 때만 계산
-            # 피어슨 상관계수 계산
-            corr = np.corrcoef(csv_slice, trc_slice)[0,1]
-            if not np.isnan(corr) and corr > max_corr:
-                max_corr = corr
-                optimal_offset = offset
+    # lag 범위 설정: 초기 오프셋 기준으로 좌우 window_size만큼 설정
+    lag_range = [initial_offset - window_size, initial_offset + window_size]
+    print(f"초기 오프셋: {initial_offset}, lag_range: {lag_range}")
+
+    # 시리즈 생성
+    csv_series = pd.Series(csv_distances)
+    trc_series = pd.Series(trc_distances)
+    
+    for lag in range(lag_range[0], lag_range[1] + 1):
+        # csv 데이터를 양수 방향으로 이동하여 lag 값 조정
+        shifted_csv = csv_series.shift(lag)
+        
+        # NaN 값 제거 후 공통 인덱스만 사용
+        valid_indices = ~(shifted_csv.isna() | trc_series.isna())
+        csv_temp = shifted_csv[valid_indices]
+        trc_temp = trc_series[valid_indices]
+        
+        # 데이터가 충분하지 않으면 건너뛰기
+        if len(csv_temp) < 10:  # 최소 10개 이상의 데이터 포인트 필요
+            continue
+
+        # 상관계수의 절댓값을 비교하여 최대값 갱신
+        corr = csv_temp.corr(trc_temp)
+        
+        # NaN 값이면 건너뛰기
+        if np.isnan(corr):
+            continue
+
+        # 최대 상관계수 업데이트 (절댓값을 기준으로)
+        if abs(corr) > max_corr:
+            max_corr = abs(corr)
+            optimal_offset = lag
 
     print(f"CSV 데이터 길이: {len(csv_distances)} 프레임")
     print(f"TRC 데이터 길이: {len(trc_distances)} 프레임") 
@@ -327,6 +347,7 @@ def find_optimal_offset(csv_distances, trc_distances):
     print(f"최대 상관계수: {max_corr:.4f}")
 
     return optimal_offset, max_corr
+
 
 #########################
 ## Batch Processing ##
@@ -443,6 +464,10 @@ def batch_process(csv_files, trc_files, target_files, csv_marker_names, trc_mark
         # find optimal offset
         optimal_offset, max_correlation = find_optimal_offset(csv_distances, trc_distances)
 
+        # warning
+        if max_correlation < 0.85:
+            print(f"[WARNING] Correlation coefficient is less than 0.85. Please check the data.")
+
         # visualize synchronization
         visualize_euclidean_distance(csv_distances, trc_distances, optimal_offset, max_correlation)
 
@@ -469,7 +494,7 @@ def synchronize_csv_data(csv_data, optimal_offset):
     """
     if optimal_offset < 0:
         print(f"CSV 데이터를 뒤로 {abs(optimal_offset)} 프레임 이동")
-        synced_csv_data = csv_data.iloc[abs(optimal_offset):].reset_index(drop=True)
+        synced_csv_data = csv_data.iloc[abs(optimal_offset)-1:].reset_index(drop=True)
     else:
         # 앞에 빈 행 추가
         empty_rows = pd.DataFrame(np.nan, index=range(optimal_offset), columns=csv_data.columns)
