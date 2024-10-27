@@ -3,12 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog              
 import os
+from natsort import natsorted
 
-##############################
+#############################
 ## Step 1. data preparation ##
-##############################
+#############################
 
 def read_data_from_csv(csv_file_path):
     """
@@ -22,7 +23,7 @@ def read_data_from_csv(csv_file_path):
     """
     # 헤더 읽기 (첫 7줄)
     with open(csv_file_path, 'r') as f:
-        header_lines = ''.join([f.readline() for _ in range(7)])
+        header_lines = ''.join([f.readline() for _ in range(6)])
 
     # 데이터 읽기
     data = pd.read_csv(csv_file_path, skiprows=7)
@@ -61,6 +62,58 @@ def read_data_from_trc(trc_file_path):
     data = pd.read_csv(trc_file_path, sep='\t', header=None, skiprows=6, names=column_names)
 
     return header_lines, data
+
+def read_and_apply_offset_target_from_xlsx(xlsx_file_path, offset):
+    """
+    xlsx 파일에서 데이터를 읽어오는 함수
+    첫 2행은 헤더, 첫 2열은 filename과 frame 정보
+    실제 데이터는 3행 3열부터 시작
+    총 8개의 Sheet가 있으며, 각 Sheet는 하나의 joint angle 정보를 담고 있음
+    각 시트의 데이터에 오프셋만큼 데이터를 자른 후 다시 저장.
+    Args:
+        xlsx_file_path (str): xlsx 파일 경로
+        offset (int): 오프셋 값
+    Returns:
+        pd.DataFrame: xlsx 데이터
+    """
+    # 엑셀 파일 읽기
+    excel_file = pd.ExcelFile(xlsx_file_path)
+    
+    # 모든 시트에 대해 처리
+    for sheet_name in excel_file.sheet_names:
+        # 시트 데이터 읽기 
+        df = pd.read_excel(xlsx_file_path, sheet_name=sheet_name)
+        
+        # 헤더와 데이터 분리
+        headers = df.iloc[:2]  # 첫 2행은 헤더
+        data = df.iloc[2:]     # 3행부터 데이터
+        
+        # 오프셋 적용
+        if offset < 0:
+            # 음수 오프셋: 데이터를 뒤에서 자름
+            data = data.iloc[abs(offset):]
+        else:
+            # 양수 오프셋: 데이터 앞에 빈 행 추가
+            empty_rows = pd.DataFrame(np.nan, index=range(offset), columns=data.columns)
+            data = pd.concat([empty_rows, data], ignore_index=True)
+        
+        # 헤더와 데이터 다시 합치기
+        final_df = pd.concat([headers, data], ignore_index=True)
+        
+        # 새로운 폴더에 결과 저장
+        output_path = os.path.join(os.path.dirname(xlsx_file_path), 'synced_data')
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        output_path = os.path.join(output_path, f'{os.path.basename(xlsx_file_path)[:-5]}_sync.xlsx')
+        
+        # 첫 시트면 새로 만들고, 아니면 기존 파일에 추가
+        if sheet_name == excel_file.sheet_names[0]:
+            final_df.to_excel(output_path, sheet_name=sheet_name, index=False)
+        else:
+            with pd.ExcelWriter(output_path, mode='a', engine='openpyxl') as writer:
+                final_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+    return pd.read_excel(output_path)  # 동기화된 데이터 반환
 
 def find_csv_marker_columns(header_lines, data, marker_names):
     """
@@ -147,7 +200,7 @@ def euclidean_distance(q1, q2):
     
     INPUTS:
     - q1: list of N_dimensional coordinates of point
-         or list of N points of N_dimensional coordinates
+        or list of N points of N_dimensional coordinates
     - q2: idem
 
     OUTPUTS:
@@ -189,14 +242,14 @@ def visualize_euclidean_distance(csv_distances, trc_distances, optimal_offset, m
     # Mark offset points
     if optimal_offset < 0:
         ax1.axvline(x=abs(optimal_offset), color='blue', linestyle='--', alpha=0.5, 
-                   label=f'Marker-based Start (offset={optimal_offset})')
+                label=f'Marker-based Start (offset={optimal_offset})')
         ax1.axvline(x=0, color='orange', linestyle='--', alpha=0.5,
-                   label='Markerless Start')
+                label='Markerless Start')
     else:
         ax1.axvline(x=0, color='blue', linestyle='--', alpha=0.5,
-                   label='Marker-based Start')
+                label='Marker-based Start')
         ax1.axvline(x=optimal_offset, color='orange', linestyle='--', alpha=0.5,
-                   label=f'Markerless Start (offset={optimal_offset})')
+                label=f'Markerless Start (offset={optimal_offset})')
 
     ax1.set_title('Euclidean Distance Comparison Before Sync', fontsize=14)
     ax1.set_xlabel('Frame', fontsize=12)
@@ -223,11 +276,13 @@ def visualize_euclidean_distance(csv_distances, trc_distances, optimal_offset, m
     # display correlation coefficient
     correlation = max_correlation
     ax2.text(0.02, 0.98, f'Correlation: {correlation:.4f}', 
-             transform=ax2.transAxes, fontsize=10,
-             verticalalignment='top')
-
+            transform=ax2.transAxes, fontsize=10,
+            verticalalignment='top')
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)  # block=False로 설정하여 비동기적으로 표시
+    plt.pause(2)  # 2초 동안 대기
+    plt.close()  # 2초 후 자동으로 닫기
+
 
 # Compute correlation coefficient and find optimal offset
 def find_optimal_offset(csv_distances, trc_distances):
@@ -277,7 +332,7 @@ def find_optimal_offset(csv_distances, trc_distances):
 ## Batch Processing ##
 #########################
 
-def batch_process(csv_files, trc_files, csv_marker_names, trc_marker_names, csv_frame_range=None, trc_frame_range=None):
+def batch_process(csv_files, trc_files, target_files, csv_marker_names, trc_marker_names, csv_frame_range=None, trc_frame_range=None):
     """
     매칭된 CSV와 TRC 파일 목록을 받아서 동기화를 수행하는 함수
 
@@ -289,8 +344,8 @@ def batch_process(csv_files, trc_files, csv_marker_names, trc_marker_names, csv_
         csv_frame_range (tuple): CSV 데이터의 (시작 프레임, 종료 프레임)
         trc_frame_range (tuple): TRC 데이터의 (시작 프레임, 종료 프레임)
     """
-    for csv_file_path, trc_file_path in zip(csv_files, trc_files):
-        print(f"\nProcessing:\nCSV: {csv_file_path}\nTRC: {trc_file_path}")
+    for csv_file_path, trc_file_path, target_file_path in zip(csv_files, trc_files, target_files):
+        print(f"\nProcessing:\nCSV: {csv_file_path}\nTRC: {trc_file_path}\nTarget: {target_file_path}")
 
         csv_header, csv_data = read_data_from_csv(csv_file_path)
         trc_header, trc_data = read_data_from_trc(trc_file_path)
@@ -398,6 +453,9 @@ def batch_process(csv_files, trc_files, csv_marker_names, trc_marker_names, csv_
         save_synchronized_csv(csv_file_path, csv_header, synced_csv_data)
         print(f"Synchronized CSV saved as: {csv_file_path[:-4]}_sync.csv")
 
+        # 동기화된 xlsx 파일 저장
+        read_and_apply_offset_target_from_xlsx(target_file_path, optimal_offset)
+
 def synchronize_csv_data(csv_data, optimal_offset):
     """
     CSV 데이터를 최적의 오프셋에 따라 동기화하는 함수
@@ -429,7 +487,14 @@ def save_synchronized_csv(csv_file_path, header_lines, synced_csv_data):
         header_lines (str): CSV 헤더 정보
         synced_csv_data (pd.DataFrame): 동기화된 CSV 데이터
     """
-    output_file_path = f"{csv_file_path[:-4]}_sync.csv"
+    # 동기화된 CSV 파일을 저장할 폴더 생성
+    sync_folder = os.path.join(os.path.dirname(csv_file_path), "sync_results")
+    if not os.path.exists(sync_folder):
+        os.makedirs(sync_folder)
+
+    # 동기화된 CSV 파일 경로 설정
+    filename = os.path.basename(csv_file_path)
+    output_file_path = os.path.join(sync_folder, f"{os.path.splitext(filename)[0]}_sync.csv")
 
     # newline='' 파라미터 추가
     with open(output_file_path, 'w', newline='') as f:
@@ -449,16 +514,21 @@ if __name__ == "__main__":
     print("CSV 파일들을 선택하세요:")
     csv_files = filedialog.askopenfilenames(title="Select CSV files", filetypes=[("CSV files", "*.csv")])
     csv_files = list(csv_files)
-    csv_files.sort()  # 오름차순 정렬
+    csv_files = natsorted(csv_files)  # 자연 정렬 적용
 
     print("TRC 파일들을 선택하세요:")
     trc_files = filedialog.askopenfilenames(title="Select TRC files", filetypes=[("TRC files", "*.trc")])
     trc_files = list(trc_files)
-    trc_files.sort()  # 오름차순 정렬
+    trc_files = natsorted(trc_files)  # 자연 정렬 적용
+
+    print(f"offset을 적용할 angle을 포함한 xlsx 파일을 선택하세요.")
+    target_files = filedialog.askopenfilenames(title="Select xlsx files", filetypes=[("xlsx files", "*.xlsx")])
+    target_files = list(target_files)
+    target_files = natsorted(target_files)  # 자연 정렬 적용
 
     # 파일 수 확인
-    if len(csv_files) != len(trc_files):
-        print("[ERROR] 선택한 CSV와 TRC 파일의 수가 일치하지 않습니다.")
+    if len(csv_files) != len(trc_files) != len(target_files):
+        print("[ERROR] 선택한 CSV, TRC, 그리고 타겟 파일의 수가 일치하지 않습니다.")
         exit()
 
     # 여러 개의 마커 이름을 리스트로 지정
@@ -466,7 +536,7 @@ if __name__ == "__main__":
     trc_marker_names = ['RElbow', 'LElbow']
 
     # 프레임 범위 입력 여부 확인
-    use_frame_range = 'y'
+    use_frame_range = 'n'
 
     if use_frame_range == 'y':
         csv_start_frame = 0
@@ -481,4 +551,4 @@ if __name__ == "__main__":
         trc_frame_range = None
 
     # 배치 프로세스 실행
-    batch_process(csv_files, trc_files, csv_marker_names, trc_marker_names, csv_frame_range, trc_frame_range)
+    batch_process(csv_files, trc_files, target_files, csv_marker_names, trc_marker_names, csv_frame_range, trc_frame_range)
