@@ -1,24 +1,19 @@
-# Data-processing-tool-for-biomechanics
-Data processing tool for biomechanics.\
-TODO.
-1. Detect and filter outliers:
-Identify and filter out anomalies or outliers from the given data.
+# Data Processing Tool for Biomechanics
 
-3. Apply various filters and visualize:
-Apply different filters to the data to remove noise or emphasize specific patterns.\
-Utilize visualization tools to represent the processed data in graphs or charts.
+A comprehensive data processing tool for biomechanics, designed to handle various preprocessing, analysis, and visualization tasks.
 
-4. Normalization tool:
-Normalize the data to standardize units and facilitate analysis.
+## Features
 
-5. Calculate segment angles:
-Compute segment angles based on the positional data.
+- **Outlier Removal**: Identify and eliminate noise from biomechanical data.
+- **Normalization**: Standardize data for better comparison and analysis.
+- **Visualization Tools**: Generate insightful plots and graphs for biomechanical data interpretation.
+- **SPM (Statistical Parametric Mapping)**: Perform statistical analyses on time-series biomechanical data.
+- **CMC (Coefficient of Multiple Correlation)**: Assess similarity between biomechanical signals.
+- **Additional Statistical Analysis**: Various statistical tools for biomechanical research.
 
-6. Calculate joint angles:
-Compute joint angles based on the positional data.
+## TODO
 
-7. Vector coding tool:
-Tool for analyzing coordinates!
-
-8. CRP tool:
-Tool for analyzing coordinates!
+- Implement core functions
+- Develop an intuitive UI/UX for ease of use
+- Optimize performance for large-scale data processing
+- Ensure compatibility with common biomechanical data formats
