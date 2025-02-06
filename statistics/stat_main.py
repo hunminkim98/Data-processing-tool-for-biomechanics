@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy import signal
 from CMC2 import calculate_cmc  # Import the calculate_cmc function
 
 # Set Korean font and configure minus sign display
@@ -36,6 +37,7 @@ def get_waveforms(file_path, joint='Ankle', coordinate='X'):
     """
     Read joint and coordinate data from the specified file to extract marker-based and markerless waveform data.
     If the data lengths differ, they are trimmed to the shorter length, and NaN values are removed.
+    The data is then filtered with a 6Hz lowpass filter and normalized to 101 points using linear interpolation.
     """
     sheet_idx = JOINT_SHEET_MAPPING.get(joint)
     if sheet_idx is None:
@@ -72,7 +74,24 @@ def get_waveforms(file_path, joint='Ankle', coordinate='X'):
     if marker_based_wave.size == 0:
         raise ValueError(f"All data for joint {joint} in file {file_path} has been removed due to NaN values.")
     
-    return marker_based_wave, markerless_wave
+    # Apply 6Hz lowpass filter
+    # Assuming 100Hz sampling rate (can be adjusted if needed)
+    fs = 100  # sampling frequency in Hz
+    fc = 6    # cutoff frequency in Hz
+    w = fc / (fs / 2)  # Normalize the frequency
+    b, a = signal.butter(4, w, 'low')
+    
+    marker_based_filtered = signal.filtfilt(b, a, marker_based_wave)
+    markerless_filtered = signal.filtfilt(b, a, markerless_wave)
+    
+    # Normalize to 101 points using linear interpolation
+    old_indices = np.linspace(0, 100, len(marker_based_filtered))
+    new_indices = np.linspace(0, 100, 101)
+    
+    marker_based_normalized = np.interp(new_indices, old_indices, marker_based_filtered)
+    markerless_normalized = np.interp(new_indices, old_indices, markerless_filtered)
+    
+    return marker_based_normalized, markerless_normalized
 
 def process_trial(file_path, joint='Ankle', coordinate='X'):
     """
