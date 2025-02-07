@@ -56,9 +56,9 @@ def plot_spm_results(mean_markerless, mean_markerbased, std_markerless, std_mark
 def main():
     # Create directories for saving plots
     output_folder = "SPM"
-    individual_folder = os.path.join(output_folder, "individual_trials")
+    # Removed individual_folder related lines
     os.makedirs(output_folder, exist_ok=True)
-    os.makedirs(individual_folder, exist_ok=True)
+
     
     # Specify the parent folder containing raw Excel files (same as used for CMC calculation)
     parent_folder = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\CMC\merged_check'
@@ -99,13 +99,11 @@ def main():
     print("\nPerforming SPM analysis for each motion-joint-axis combination...")
     for motion in waveform_data:
         print(f"\nProcessing Motion: {motion}")
-        motion_folder = os.path.join(individual_folder, motion)
-        os.makedirs(motion_folder, exist_ok=True)
+        # Removed motion_folder related lines
         
         for joint in waveform_data[motion]:
             print(f"  Joint: {joint}")
-            joint_folder = os.path.join(motion_folder, joint)
-            os.makedirs(joint_folder, exist_ok=True)
+            # Removed joint_folder related lines
             
             for axis in waveform_data[motion][joint]:
                 markerbased_list, markerless_list, file_paths = waveform_data[motion][joint][axis]
@@ -114,50 +112,16 @@ def main():
                     print(f"    No valid data for Axis: {axis}")
                     continue
                 
-                # Process individual trials
-                print(f"    Processing individual trials for Axis: {axis}")
-                markerbased_array = np.array(markerbased_list)
-                markerless_array = np.array(markerless_list)
-                
-                for idx, (mb_wave, ml_wave, file_path) in enumerate(zip(markerbased_list, markerless_list, file_paths)):
-                    subject = extract_subject_motion(file_path)[0]
-                    
-                    # Create arrays excluding current trial
-                    mb_others = np.delete(markerbased_array, idx, axis=0)
-                    ml_others = np.delete(markerless_array, idx, axis=0)
-                    
-                    # Calculate mean of other trials
-                    mb_others_mean = np.mean(mb_others, axis=0)
-                    ml_others_mean = np.mean(ml_others, axis=0)
-                    
-                    # Individual trial SPM analysis comparing current trial to mean of others
-                    SPMt = stats.ttest2(
-                        np.vstack([ml_wave, ml_others_mean]).reshape(2,-1),  # Current trial and mean of others
-                        np.vstack([mb_wave, mb_others_mean]).reshape(2,-1),  # Current trial and mean of others
-                        equal_var=False
-                    )
-                    SPMti = SPMt.inference(alpha=0.05, two_tailed=True, interp=True)
-                    
-                    # Plot individual trial results
-                    title = f'Individual Trial Analysis\nSubject: {subject}, Motion: {motion}\nJoint: {joint}, Axis: {axis}'
-                    output_path = os.path.join(joint_folder, f"individual_trial_{subject}_{motion}_{joint}_{axis}.png")
-                    
-                    # For individual trials, show comparison with mean of others
-                    plot_spm_results(
-                        ml_wave, mb_wave,  # Current trial
-                        ml_others_mean, mb_others_mean,  # Mean of other trials
-                        SPMti, title, output_path, show_std=False
-                    )
-                    
-                    print(f"      Saved individual trial plot for Subject: {subject}")
-                    if len(SPMti.p) > 0:  # If there are any significant clusters
-                        print(f"      Significant differences found (p-values: {[f'{p:.4f}' for p in SPMti.p]})")
+                # Removed individual trials processing section
                 
                 # Process combined data
                 print(f"    Processing combined data for Axis: {axis}")
                 
-                # Combined SPM analysis
-                SPMt = stats.ttest2(markerless_array, markerbased_array, equal_var=False)
+                markerbased_array = np.array(markerbased_list)
+                markerless_array = np.array(markerless_list)
+
+                # Combined SPM analysis (paired test)
+                SPMt = stats.ttest_paired(markerless_array, markerbased_array)
                 SPMti = SPMt.inference(alpha=0.05, two_tailed=True, interp=True)
                 
                 # Calculate mean waveforms and std
@@ -177,7 +141,7 @@ def main():
                 print(f"    Critical threshold: {SPMti.zstar}")
                 print(f"    P-values for clusters: {[f'{p:.4f}' for p in SPMti.p]}")
     
-    print("\nAll SPM analyses completed. Results saved in 'SPM' and 'SPM/individual_trials' folders.")
+    print("\nAll SPM analyses completed. Results saved in 'SPM' folder.") # Modified the message
 
 
 if __name__ == '__main__':
