@@ -5,7 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import signal
-from CMC2 import calculate_cmc  # Import the calculate_cmc function
+from CMC import calculate_cmc  # Import the calculate_cmc function
+from collections import defaultdict
+from scipy.interpolate import CubicSpline
 
 # Set Korean font and configure minus sign display
 plt.rcParams['font.family'] = 'Malgun Gothic'  # For Windows
@@ -36,16 +38,19 @@ def extract_subject_motion(file_path):
 def get_waveforms(file_path, joint='Ankle', coordinate='X'):
     """
     Read joint and coordinate data from the specified file to extract marker-based and markerless waveform data.
-    If the data lengths differ, they are trimmed to the shorter length, and NaN values are removed.
-    The data is then filtered with a 6Hz lowpass filter and normalized to 101 points using linear interpolation.
+    Uses standard motion capture frame rate of 120Hz for filtering.
     """
     sheet_idx = JOINT_SHEET_MAPPING.get(joint)
     if sheet_idx is None:
         raise ValueError(f"Unsupported joint: {joint}. Available options: {list(JOINT_SHEET_MAPPING.keys())}.")
     
+    # Read the Excel file
     df = pd.read_excel(file_path, header=[0, 1, 2], sheet_name=sheet_idx)
     
-    # marker-based: columns 1 to 3, markerless: columns 5 to 7
+    # Use standard motion capture frame rate
+    fs = 120  # Hz (standard motion capture frame rate)
+    
+    # Extract marker-based and markerless data
     marker_based = df.iloc[:, 1:4]
     markerless = df.iloc[:, 5:8]
     
@@ -64,19 +69,35 @@ def get_waveforms(file_path, joint='Ankle', coordinate='X'):
     marker_based_wave = marker_based_wave[:common_length]
     markerless_wave = markerless_wave[:common_length]
     
-    # Remove NaN values
+    # Remove NaN values while preserving temporal order
     mask = ~np.isnan(marker_based_wave) & ~np.isnan(markerless_wave)
     if not np.all(mask):
         print(f"Warning: In file '{file_path}', joint {joint} and coordinate {coordinate} had {np.count_nonzero(~mask)} NaN values removed.")
-    marker_based_wave = marker_based_wave[mask]
-    markerless_wave = markerless_wave[mask]
+        # Instead of removing NaN values, interpolate them
+        marker_based_wave = pd.Series(marker_based_wave).interpolate().values
+        markerless_wave = pd.Series(markerless_wave).interpolate().values
     
     if marker_based_wave.size == 0:
         raise ValueError(f"All data for joint {joint} in file {file_path} has been removed due to NaN values.")
     
-    # Apply 6Hz lowpass filter
-    # Assuming 100Hz sampling rate (can be adjusted if needed)
-    fs = 100  # sampling frequency in Hz
+    # Check for normality before filtering
+    from scipy import stats
+    _, p_value_mb = stats.shapiro(marker_based_wave)
+    _, p_value_ml = stats.shapiro(markerless_wave)
+    
+    normality_threshold = 0.05
+    is_normal = p_value_mb >= normality_threshold and p_value_ml >= normality_threshold
+    
+    if not is_normal:
+        print(f"Warning: Data not normally distributed (p-values: marker-based={p_value_mb:.4f}, markerless={p_value_ml:.4f})")
+        print("Applying robust preprocessing steps...")
+        
+        # Use median filtering for non-normal data
+        window_size = 5  # Adjust as needed
+        marker_based_wave = signal.medfilt(marker_based_wave, window_size)
+        markerless_wave = signal.medfilt(markerless_wave, window_size)
+    
+    # Apply 6Hz lowpass filter with standard frame rate
     fc = 6    # cutoff frequency in Hz
     w = fc / (fs / 2)  # Normalize the frequency
     b, a = signal.butter(4, w, 'low')
@@ -84,12 +105,24 @@ def get_waveforms(file_path, joint='Ankle', coordinate='X'):
     marker_based_filtered = signal.filtfilt(b, a, marker_based_wave)
     markerless_filtered = signal.filtfilt(b, a, markerless_wave)
     
-    # Normalize to 101 points using linear interpolation
-    old_indices = np.linspace(0, 100, len(marker_based_filtered))
-    new_indices = np.linspace(0, 100, 101)
+    # Calculate actual sampling rate based on time stamps if available
+    try:
+        time_stamps = df.index.values
+        actual_fs = 1 / np.mean(np.diff(time_stamps))
+        if abs(actual_fs - fs) > 5:  # If difference is more than 5 Hz
+            print(f"Warning: Actual sampling rate ({actual_fs:.1f} Hz) differs from standard rate ({fs} Hz)")
+    except:
+        print("Warning: Could not calculate actual sampling rate from time stamps")
     
-    marker_based_normalized = np.interp(new_indices, old_indices, marker_based_filtered)
-    markerless_normalized = np.interp(new_indices, old_indices, markerless_filtered)
+    # Normalize to 101 points using cubic spline interpolation
+    # First, create time vector based on actual sampling rate
+    original_time = np.linspace(0, 100, len(marker_based_filtered))
+    cs_mb = CubicSpline(original_time, marker_based_filtered)
+    cs_ml = CubicSpline(original_time, markerless_filtered)
+    
+    new_indices = np.linspace(0, 100, 101)
+    marker_based_normalized = cs_mb(new_indices)
+    markerless_normalized = cs_ml(new_indices)
     
     return marker_based_normalized, markerless_normalized
 
@@ -127,44 +160,61 @@ def aggregate_CMC(parent_folder,
                   joints=['Left_Ankle', 'Left_Hip', 'Left_Knee', 'Right_Ankle', 'Right_Hip', 'Right_Knee', 'Trunk'], 
                   axes=['X', 'Y', 'Z']):
     """
-    Calculate the CMC value for each joint and coordinate for all Excel files within parent_folder
-    and return a DataFrame.
-    Folder structure example: parent_folder/subject/motion/*.xlsx
+    모든 trials의 웨이브폰을 통합하여 CMC 계산
     """
     trial_files = glob.glob(os.path.join(parent_folder, '*', '*', '*.xlsx'))
     print(f"Found {len(trial_files)} trial files in '{parent_folder}'.")
-    trial_files.sort()
+    
     records = []
+    
+    # 관절별/축별로 모든 trials의 웨이브폰 수집
+    waveform_dict = defaultdict(list)
     
     for file in trial_files:
         subject, motion = extract_subject_motion(file)
         for joint in joints:
             for axis in axes:
                 try:
-                    cmc_val = process_trial(file, joint, axis)
-                    records.append({
-                        'subject': subject, 
-                        'motion': motion, 
-                        'joint': joint, 
-                        'axis': axis, 
-                        'trial_file': file, 
-                        'cmc': cmc_val
-                    })
+                    mb_wave, ml_wave = get_waveforms(file, joint, axis)
+                    combined_wave = np.vstack([mb_wave, ml_wave])
+                    waveform_dict[(joint, axis)].append(combined_wave)
                 except Exception as e:
                     print(f"Error processing {file} (joint: {joint}, axis: {axis}): {e}")
+    
+    # 통합 웨이브폰으로 CMC 계산
+    for (joint, axis), waveforms in waveform_dict.items():
+        if len(waveforms) < 2:
+            print(f"Warning: Insufficient waveforms for {joint}-{axis} (n={len(waveforms)})")
+            continue
+            
+        try:
+            # 모든 trials의 웨이브폰을 하나의 gait_cycles 리스트로 결합
+            cmc_val = calculate_cmc(waveforms)
+            
+            # 실수부만 추출 (복소수 결과 방지)
+            cmc_val = cmc_val.real if isinstance(cmc_val, complex) else cmc_val
+            
+            records.append({
+                'joint': joint,
+                'axis': axis,
+                'num_trials': len(waveforms),
+                'cmc': cmc_val
+            })
+        except Exception as e:
+            print(f"Error calculating CMC for {joint}-{axis}: {e}")
+    
     return pd.DataFrame(records)
 
 def plot_aggregate_CMC(df):
     """
-    Visualize the aggregated CMC values using boxplots grouped by subject, motion, joint, and axis.
+    시각화 함수 수정
     """
-    for col, title in zip(['subject', 'motion', 'joint', 'axis'], 
-                            ["CMC Distribution by Subject", "CMC Distribution by Motion", "CMC Distribution by Joint", "CMC Distribution by Axis"]):
-        plt.figure(figsize=(12, 6))
-        sns.boxplot(x=col, y='cmc', data=df)
-        plt.title(title)
-        plt.ylabel("CMC Value")
-        plt.show()
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(x='joint', y='cmc', hue='axis', data=df)
+    plt.title("CMC Distribution by Joint and Axis")
+    plt.ylabel("CMC Value")
+    plt.legend(title='Axis')
+    plt.show()
 
 def main():
     # Specify the parent folder path (multiple subject folders exist under this path)
@@ -179,47 +229,33 @@ def main():
         print(df_cmc)
         
         if not df_cmc.empty:
-            subject_summary = df_cmc.groupby('subject').agg(mean=('cmc', 'mean'), std=('cmc', 'std'), count=('trial_file', lambda x: x.nunique()))
-            motion_summary = df_cmc.groupby('motion').agg(mean=('cmc', 'mean'), std=('cmc', 'std'), count=('trial_file', lambda x: x.nunique()))
-            joint_summary = df_cmc.groupby('joint').agg(mean=('cmc', 'mean'), std=('cmc', 'std'), count=('trial_file', lambda x: x.nunique()))
-            joint_axis_pivot = df_cmc.pivot_table(index='joint', columns='axis', values='cmc', aggfunc=[np.mean, np.std])
+            # 새로운 요약 방식으로 변경
+            joint_axis_summary = df_cmc.groupby(['joint', 'axis']).agg(
+                mean_cmc=('cmc', 'mean'),
+                std_cmc=('cmc', 'std'),
+                trial_count=('num_trials', 'sum')
+            ).reset_index()
             
-            print("\nAverage CMC by Subject:")
-            print(subject_summary)
-            print("\nAverage CMC by Motion:")
-            print(motion_summary)
-            print("\nAverage CMC by Joint:")
-            print(joint_summary)
             print("\nAverage CMC by Joint and Axis:")
-            print(joint_axis_pivot)
+            print(joint_axis_summary)
             
-            # Save aggregated results to an Excel file (with formatting adjustments)
+            # Excel 저장 부분도 수정
             output_excel_path = os.path.join(os.path.dirname(parent_folder), "cmc_aggregated_results.xlsx")
             with pd.ExcelWriter(output_excel_path, engine='xlsxwriter') as writer:
-                df_cmc.to_excel(writer, sheet_name='Trial Data', index=False)
-                subject_summary.to_excel(writer, sheet_name='Subject Summary')
-                motion_summary.to_excel(writer, sheet_name='Motion Summary')
-                joint_summary.to_excel(writer, sheet_name='Joint Summary')
-                joint_axis_pivot.to_excel(writer, sheet_name='Joint Axis Summary')
+                df_cmc.to_excel(writer, sheet_name='Combined Analysis', index=False)
+                joint_axis_summary.to_excel(writer, sheet_name='Summary', index=False)
                 
-                # Adjust column widths for the Trial Data sheet
-                worksheet = writer.sheets['Trial Data']
-                worksheet.set_column('A:A', 15)   # subject
-                worksheet.set_column('B:B', 15)   # motion
-                worksheet.set_column('C:C', 15)   # joint
-                worksheet.set_column('D:D', 10)   # axis
-                worksheet.set_column('E:E', 50)   # trial_file
-                worksheet.set_column('F:F', 10)   # cmc
-
-                # Adjust column widths for summary sheets
-                for sheet in ['Subject Summary', 'Motion Summary', 'Joint Summary']:
-                    ws = writer.sheets[sheet]
-                    ws.set_column('A:A', 15)
-                    ws.set_column('B:D', 12)
-                writer.sheets['Joint Axis Summary'].set_column('A:A', 15)
+                # 컬럼 너비 조정
+                worksheet = writer.sheets['Combined Analysis']
+                worksheet.set_column('A:A', 15)  # joint
+                worksheet.set_column('B:B', 10)  # axis
+                worksheet.set_column('C:C', 12)  # num_trials
+                worksheet.set_column('D:D', 10)  # cmc
                 
-            print(f"\nAggregated results have been saved to '{output_excel_path}'.")
-            plot_aggregate_CMC(df_cmc)
+                writer.sheets['Summary'].set_column('A:B', 15)
+                writer.sheets['Summary'].set_column('C:E', 12)
+            
+            plot_aggregate_CMC(df_cmc)  # 이 함수도 수정 필요
         else:
             print("No trial files available for aggregation.")
     
