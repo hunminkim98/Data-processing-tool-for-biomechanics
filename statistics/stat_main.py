@@ -35,22 +35,24 @@ def extract_subject_motion(file_path):
     motion = parts[-2] if len(parts) >= 3 else 'unknown'
     return subject, motion
 
-def get_waveforms(file_path, joint='Ankle', coordinate='X'):
+def get_waveforms(file_path, joint='Ankle', coordinate='X', SPM=False, filtering=False):
     """
     Read joint and coordinate data from the specified file to extract marker-based and markerless waveform data.
     Uses standard motion capture frame rate of 120Hz for filtering.
     """
+    subject, motion = extract_subject_motion(file_path)
+    
+    if subject == "성기훈" and any(kw in joint for kw in ["Knee", "Ankle"]):
+        raise ValueError(f"Excluding {joint} {coordinate}-axis data for subject 성기훈")
+    
     sheet_idx = JOINT_SHEET_MAPPING.get(joint)
     if sheet_idx is None:
         raise ValueError(f"Unsupported joint: {joint}. Available options: {list(JOINT_SHEET_MAPPING.keys())}.")
     
-    # Read the Excel file
     df = pd.read_excel(file_path, header=[0, 1, 2], sheet_name=sheet_idx)
     
-    # Use standard motion capture frame rate
     fs = 120  # Hz (standard motion capture frame rate)
     
-    # Extract marker-based and markerless data
     marker_based = df.iloc[:, 1:4]
     markerless = df.iloc[:, 5:8]
     
@@ -61,61 +63,49 @@ def get_waveforms(file_path, joint='Ankle', coordinate='X'):
     marker_based_wave = marker_based.iloc[:, coord_idx].values
     markerless_wave = markerless.iloc[:, coord_idx].values
 
-    # Trim to the shorter length if lengths differ
     len_mb, len_ml = len(marker_based_wave), len(markerless_wave)
-    if len_mb != len_ml:
-        print(f"Warning: In file '{file_path}', joint {joint} and coordinate {coordinate} have mismatched lengths (Marker-based: {len_mb}, Markerless: {len_ml}). Using the minimum length.")
+    # if len_mb != len_ml:
+    #     print(f"Warning: In file '{file_path}', joint {joint} and coordinate {coordinate} have mismatched lengths (Marker-based: {len_mb}, Markerless: {len_ml}). Using the minimum length.")
     common_length = min(len_mb, len_ml)
     marker_based_wave = marker_based_wave[:common_length]
     markerless_wave = markerless_wave[:common_length]
     
-    # Remove NaN values while preserving temporal order
     mask = ~np.isnan(marker_based_wave) & ~np.isnan(markerless_wave)
     if not np.all(mask):
-        print(f"Warning: In file '{file_path}', joint {joint} and coordinate {coordinate} had {np.count_nonzero(~mask)} NaN values removed.")
-        # Instead of removing NaN values, interpolate them
+        # print(f"Warning: In file '{file_path}', joint {joint} and coordinate {coordinate} had {np.count_nonzero(~mask)} NaN values removed.")
         marker_based_wave = pd.Series(marker_based_wave).interpolate().values
         markerless_wave = pd.Series(markerless_wave).interpolate().values
     
     if marker_based_wave.size == 0:
         raise ValueError(f"All data for joint {joint} in file {file_path} has been removed due to NaN values.")
     
-    # Check for normality before filtering
-    from scipy import stats
-    _, p_value_mb = stats.shapiro(marker_based_wave)
-    _, p_value_ml = stats.shapiro(markerless_wave)
-    
-    normality_threshold = 0.05
-    is_normal = p_value_mb >= normality_threshold and p_value_ml >= normality_threshold
-    
-    if not is_normal:
-        print(f"Warning: Data not normally distributed (p-values: marker-based={p_value_mb:.4f}, markerless={p_value_ml:.4f})")
-        print("Applying robust preprocessing steps...")
+    if SPM:
+        from scipy import stats
+        _, p_value_mb = stats.shapiro(marker_based_wave)
+        _, p_value_ml = stats.shapiro(markerless_wave)
         
-        # Use median filtering for non-normal data
-        window_size = 5  # Adjust as needed
-        marker_based_wave = signal.medfilt(marker_based_wave, window_size)
-        markerless_wave = signal.medfilt(markerless_wave, window_size)
+        normality_threshold = 0.05
+        is_normal = p_value_mb >= normality_threshold and p_value_ml >= normality_threshold
+        
+        if not is_normal:
+            print(f"Warning: Data not normally distributed (p-values: marker-based={p_value_mb:.4f}, markerless={p_value_ml:.4f})")
+            print("Applying robust preprocessing steps...")
+            
+            window_size = 5
+            marker_based_wave = signal.medfilt(marker_based_wave, window_size)
+            markerless_wave = signal.medfilt(markerless_wave, window_size)
     
-    # Apply 6Hz lowpass filter with standard frame rate
-    fc = 6    # cutoff frequency in Hz
-    w = fc / (fs / 2)  # Normalize the frequency
-    b, a = signal.butter(4, w, 'low')
+    if filtering:
+        fc = 6
+        w = fc / (fs / 2)
+        b, a = signal.butter(4, w, 'low')
+        
+        marker_based_filtered = signal.filtfilt(b, a, marker_based_wave)
+        markerless_filtered = signal.filtfilt(b, a, markerless_wave)
+    else:
+        marker_based_filtered = marker_based_wave
+        markerless_filtered = markerless_wave
     
-    marker_based_filtered = signal.filtfilt(b, a, marker_based_wave)
-    markerless_filtered = signal.filtfilt(b, a, markerless_wave)
-    
-    # Calculate actual sampling rate based on time stamps if available
-    try:
-        time_stamps = df.index.values
-        actual_fs = 1 / np.mean(np.diff(time_stamps))
-        if abs(actual_fs - fs) > 5:  # If difference is more than 5 Hz
-            print(f"Warning: Actual sampling rate ({actual_fs:.1f} Hz) differs from standard rate ({fs} Hz)")
-    except:
-        print("Warning: Could not calculate actual sampling rate from time stamps")
-    
-    # Normalize to 101 points using cubic spline interpolation
-    # First, create time vector based on actual sampling rate
     original_time = np.linspace(0, 100, len(marker_based_filtered))
     cs_mb = CubicSpline(original_time, marker_based_filtered)
     cs_ml = CubicSpline(original_time, markerless_filtered)
