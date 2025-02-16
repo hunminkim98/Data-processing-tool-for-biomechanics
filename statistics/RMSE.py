@@ -95,21 +95,37 @@ def visualize_outliers(df, output_dir):
     plt.show()
     return plot_path
 
-if __name__ == '__main__':
-    # Configure output paths
-    results_dir = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\results'
-    data_source = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\CMC\merged_check'
+def calculate_average_rmse(df):
+    """Calculate average RMSE values for each motion, joint, and axis combination after outlier removal"""
+    # Group by motion, joint, and axis to calculate mean and std
+    summary = df.groupby(['motion', 'joint', 'axis'])['rmse'].agg(['mean', 'std']).reset_index()
     
-    # Create results directory if needed
-    os.makedirs(results_dir, exist_ok=True)
+    # Format the results as "mean ± std" with 2 decimal places
+    summary['result'] = summary['mean'].round(2).astype(str) + ' ± ' + summary['std'].round(2).astype(str)
     
-    # Generate timestamp for unique filename
-    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-    output_file = os.path.join(results_dir, f'RMSE_Results_{timestamp}.xlsx')
+    # Create pivot tables for each motion
+    motion_tables = {}
+    for motion in summary['motion'].unique():
+        motion_data = summary[summary['motion'] == motion]
+        pivot = motion_data.pivot(index='joint', columns='axis', values='result')
+        motion_tables[motion] = pivot
     
-    # Process data and save results
+    return motion_tables
+
+def main():
     try:
-        print(f"Processing data from: {data_source}")
+        # Configure output paths
+        results_dir = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\results'
+        data_source = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\CMC\merged_check'
+        
+        # Create results directory if needed
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Generate timestamp for unique filename
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        output_file = os.path.join(results_dir, f'RMSE_Results_{timestamp}.xlsx')
+        
+        # Aggregate RMSE values
         df = aggregate_rmse(data_source)
         
         # Add outlier detection
@@ -119,8 +135,11 @@ if __name__ == '__main__':
             is_outlier = ~identify_outliers_iqr(df, motion)
             df.loc[motion_mask & is_outlier, 'outlier'] = True
         
-        # Create cleaned dataset
+        # Create cleaned dataset (non-outliers only)
         clean_df = df[~df['outlier']].copy()
+        
+        # Calculate average RMSE values for each motion
+        motion_tables = calculate_average_rmse(clean_df)
         
         # Save to Excel with formatting
         with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
@@ -130,9 +149,14 @@ if __name__ == '__main__':
             # Save cleaned data
             clean_df.to_excel(writer, index=False, sheet_name='Cleaned Data')
             
+            # Save average RMSE values for each motion
+            for motion, pivot_table in motion_tables.items():
+                sheet_name = f'{motion} Summary'
+                pivot_table.to_excel(writer, sheet_name=sheet_name)
+            
             workbook = writer.book
             
-            # Format both sheets
+            # Format trial data sheets
             for sheet_name in ['All Data', 'Cleaned Data']:
                 worksheet = writer.sheets[sheet_name]
                 worksheet.autofilter(0, 0, len(df), len(df.columns)-1)
@@ -141,9 +165,12 @@ if __name__ == '__main__':
         
         print(f"Successfully saved results to:\n{output_file}")
         
-        # Generate visualization
+        # Generate outlier visualization
         plot_path = visualize_outliers(df, results_dir)
         print(f"Generated visualization:\n{plot_path}")
     
     except Exception as e:
         print(f"Error processing data: {e}")
+
+if __name__ == '__main__':
+    main()
