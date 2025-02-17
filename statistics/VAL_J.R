@@ -235,89 +235,51 @@ synchronize_data <- function(marker_data, markerless_data, joint_name) {
   marker_data$Frame <- as.numeric(marker_data$Frame)
   markerless_data$Frame <- as.numeric(markerless_data$Frame)
   
-  # Remove any NA values
-  marker_data <- marker_data %>% filter(!is.na(Frame))
-  markerless_data <- markerless_data %>% filter(!is.na(Frame))
-  
-  # Find the overlapping frame range
-  start_frame <- max(min(marker_data$Frame), min(markerless_data$Frame))
-  end_frame <- min(max(marker_data$Frame), max(markerless_data$Frame))
-  
-  cat("\nFrame range:", start_frame, "to", end_frame)
-  
-  # Filter data to overlapping frames
-  marker_subset <- marker_data %>% 
-    filter(Frame >= start_frame & Frame <= end_frame) %>%
-    arrange(Frame)
-  
-  markerless_subset <- markerless_data %>% 
-    filter(Frame >= start_frame & Frame <= end_frame) %>%
-    arrange(Frame)
-  
-  # Ensure equal number of frames
-  min_length <- min(nrow(marker_subset), nrow(markerless_subset))
-  if (min_length > 0) {
-    marker_subset <- marker_subset[1:min_length,]
-    markerless_subset <- markerless_subset[1:min_length,]
-    
-    # Create new plotting window
-    dev.new(width=10, height=8)
-    
-    # Set up plotting parameters
-    old_par <- par(no.readonly = TRUE)  # Save old parameters
-    par(mfrow=c(3,1), mar=c(4,4,2,1))
-    
-    # X coordinate plot
-    plot(marker_subset$Frame, marker_subset$X, type="l", col="blue", 
-         main=paste(joint_name, "- X Coordinate"), xlab="Frame", ylab="X Position (mm)")
-    lines(markerless_subset$Frame, markerless_subset$X, col="red")
-    legend("topright", legend=c("Marker", "Markerless"), col=c("blue", "red"), lty=1)
-    grid()
-    
-    # Y coordinate plot
-    plot(marker_subset$Frame, marker_subset$Y, type="l", col="blue",
-         main="Y Coordinate", xlab="Frame", ylab="Y Position (mm)")
-    lines(markerless_subset$Frame, markerless_subset$Y, col="red")
-    grid()
-    
-    # Z coordinate plot
-    plot(marker_subset$Frame, marker_subset$Z, type="l", col="blue",
-         main="Z Coordinate", xlab="Frame", ylab="Z Position (mm)")
-    lines(markerless_subset$Frame, markerless_subset$Z, col="red")
-    grid()
-    
-    # Ask for user approval
-    user_response <- readline(prompt=paste("\nAccept synchronization for", joint_name, "? (y/n): "))
-    
-    # Restore old plotting parameters
-    par(old_par)
-    dev.off()  # Close the plotting window
-    
-    if (tolower(user_response) == "y") {
-      cat("\nSynchronization accepted for", joint_name, "-", min_length, "frames")
-      return(list(
-        marker_based = marker_subset,
-        markerless = markerless_subset,
-        accepted = TRUE
-      ))
-    } else {
-      cat("\nSynchronization rejected for", joint_name)
-      return(list(
-        marker_based = NULL,
-        markerless = NULL,
-        accepted = FALSE
-      ))
+  # 마커리스 데이터가 101개가 아닐 경우 보간
+  if (nrow(markerless_data) < 101) {
+    target_frames <- seq(1, 101)
+    for (col in c("X", "Y", "Z")) {
+      if (col %in% names(markerless_data)) {
+        # approx 함수를 사용하여 보간
+        interpolated <- approx(x = markerless_data$Frame, 
+                             y = markerless_data[[col]], 
+                             xout = target_frames,
+                             method = "linear")
+        markerless_data[[col]] <- interpolated$y
+      }
     }
-  } else {
-    cat("\nNo overlapping frames found")
-    return(list(
-      marker_based = NULL,
-      markerless = NULL,
-      accepted = FALSE
-    ))
+    markerless_data$Frame <- target_frames
   }
-}
 
+  # Create a sequence of frames from 1 to 101
+  synchronized_data <- data.frame(
+    Frame = 1:101,
+    marker_value = NA,
+    markerless_value = NA
+  )
+
+  # Fill in the values for each frame
+  for (i in 1:nrow(synchronized_data)) {
+    frame <- synchronized_data$Frame[i]
+    
+    # Get marker data for this frame
+    marker_row <- marker_data[marker_data$Frame == frame, ]
+    if (nrow(marker_row) > 0) {
+      synchronized_data$marker_value[i] <- marker_row$value
+    }
+    
+    # Get markerless data for this frame
+    markerless_row <- markerless_data[markerless_data$Frame == frame, ]
+    if (nrow(markerless_row) > 0) {
+      synchronized_data$markerless_value[i] <- markerless_row$value
+    }
+  }
+  
+  # Calculate differences
+  synchronized_data$difference <- synchronized_data$marker_value - synchronized_data$markerless_value
+  
+  return(synchronized_data)
+}
 
 # Function to process data from one sheet
 process_sheet_data <- function(data) {
@@ -389,14 +351,51 @@ read_all_files <- function(file_info) {
 
 # Function to calculate basic statistics
 calculate_stats <- function(data) {
-  stats <- data %>%
+  # 데이터 유효성 검사
+  if (is.null(data) || nrow(data) == 0 || !("difference" %in% names(data))) {
+    warning("Invalid or empty data provided to calculate_stats")
+    return(list(
+      overall = data.frame(mean = NA, sd = NA, rmse = NA, mae = NA),
+      segment_rmse = rep(NA, 10)
+    ))
+  }
+
+  # 전체 데이터에 대한 기본 통계
+  overall_stats <- data %>%
     summarise(
-      mean = mean(difference),
-      sd = sd(difference),
-      rmse = sqrt(mean(difference^2)),
-      mae = mean(abs(difference))
+      mean = mean(difference, na.rm = TRUE),
+      sd = sd(difference, na.rm = TRUE),
+      rmse = sqrt(mean(difference^2, na.rm = TRUE)),
+      mae = mean(abs(difference), na.rm = TRUE)
     )
-  return(stats)
+  
+  # 10% 구간별 RMSE 계산
+  n_frames <- nrow(data)
+  segment_size <- ceiling(n_frames / 10)  # 10% 구간 크기
+  
+  segment_rmse <- numeric(10)
+  for(i in 1:10) {
+    start_idx <- (i-1) * segment_size + 1
+    end_idx <- min(i * segment_size, n_frames)
+    
+    if (start_idx > n_frames) {
+      segment_rmse[i] <- NA
+      next
+    }
+    
+    segment_data <- data[start_idx:end_idx, ]
+    if (nrow(segment_data) > 0) {
+      segment_rmse[i] <- sqrt(mean(segment_data$difference^2, na.rm = TRUE))
+    } else {
+      segment_rmse[i] <- NA
+    }
+  }
+  
+  # 결과를 리스트로 반환
+  return(list(
+    overall = overall_stats,
+    segment_rmse = segment_rmse
+  ))
 }
 
 # Function for correlation analysis
@@ -785,7 +784,7 @@ create_time_series_plots <- function(data, joint_name) {
 }
 
 # Function to create visualization plots
-create_plots <- function(summary_stats, save_dir = "visualization", bland_altman_data = NULL, plot_suffix = "") {
+create_plots <- function(summary_stats, save_dir = "visualization", bland_altman_data = NULL, plot_suffix = "", segment_rmse_data = NULL) {
   if (!dir.exists(save_dir)) {
     dir.create(save_dir)
   }
@@ -919,7 +918,45 @@ create_plots <- function(summary_stats, save_dir = "visualization", bland_altman
     ggsave(plot_filename, p, width = 12, height = 8, dpi = 300, bg = "white")
   }
   
-  return(NULL)
+  # 구간별 RMSE 시각화 추가
+  if (!is.null(segment_rmse_data)) {
+    plot_segment_rmse(segment_rmse_data, save_dir, plot_suffix)
+  }
+}
+
+plot_segment_rmse <- function(rmse_data, save_dir, suffix = "") {
+  time_segments <- seq(10, 100, by = 10)
+  
+  for (axis in c("X", "Y", "Z")) {
+    plot_data <- data.frame(
+      Time = time_segments,
+      RMSE = rmse_data[[axis]]
+    )
+    
+    p <- ggplot(plot_data, aes(x = Time, y = RMSE)) +
+      geom_line(color = "#2c7bb6", linewidth = 1.2) +
+      geom_point(color = "#d7191c", size = 3) +
+      labs(
+        title = paste("Segment-wise RMSE (", axis, ")", sep = ""),
+        x = "Time (%)",
+        y = "RMSE"
+      ) +
+      theme_minimal() +
+      scale_x_continuous(breaks = time_segments, labels = paste0(time_segments, "%")) +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10)
+      )
+    
+    ggsave(
+      filename = file.path(save_dir, paste0("segment_rmse_", axis, suffix, ".png")),
+      plot = p,
+      width = 8,
+      height = 6,
+      dpi = 300
+    )
+  }
 }
 
 # Function to save Bland-Altman results to Excel
@@ -1326,26 +1363,29 @@ analyze_all_subjects <- function(motion_type = "kicking") {
           }
           
           for (coord in names(result$summary_stats[[joint]])) {
-            if (!(coord %in% names(combined_summary_stats[[joint]]))) {
-              combined_summary_stats[[joint]][[coord]] <- list(
-                icc_values = c(),
-                icc_pvalues = c(),
-                rmse_values = c()
-              )
-            }
+            icc_values <- result$summary_stats[[joint]][[coord]]$icc_values
+            icc_pvalues <- result$summary_stats[[joint]][[coord]]$icc_pvalues
+            rmse_values <- result$summary_stats[[joint]][[coord]]$rmse_values
+            
+            # 구간별 RMSE 데이터 수집 추가
+            segment_rmse_values <- result$summary_stats[[joint]][[coord]]$segment_rmse_values
+            
+            # 평균 및 표준편차 계산
+            combined_summary_stats[[joint]][[coord]]$segment_rmse_mean <- apply(segment_rmse_values, 2, mean, na.rm = TRUE)
+            combined_summary_stats[[joint]][[coord]]$segment_rmse_sd <- apply(segment_rmse_values, 2, sd, na.rm = TRUE)
             
             # Append values from this subject
             combined_summary_stats[[joint]][[coord]]$icc_values <- c(
               combined_summary_stats[[joint]][[coord]]$icc_values,
-              result$summary_stats[[joint]][[coord]]$icc_values
+              icc_values
             )
             combined_summary_stats[[joint]][[coord]]$icc_pvalues <- c(
               combined_summary_stats[[joint]][[coord]]$icc_pvalues,
-              result$summary_stats[[joint]][[coord]]$icc_pvalues
+              icc_pvalues
             )
             combined_summary_stats[[joint]][[coord]]$rmse_values <- c(
               combined_summary_stats[[joint]][[coord]]$rmse_values,
-              result$summary_stats[[joint]][[coord]]$rmse_values
+              rmse_values
             )
           }
         }
