@@ -1,25 +1,26 @@
 import numpy as np
-from stat_main import get_waveforms, extract_subject_motion
-import glob
-import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import glob
+import os
+from stat_main import get_waveforms, extract_subject_motion
+from scipy import stats
 
 # 좌우 관절 매핑 정의
 JOINT_PAIRS = {
     'Ankle': ['Left_Ankle', 'Right_Ankle'],
     'Knee': ['Left_Knee', 'Right_Knee'],
     'Hip': ['Left_Hip', 'Right_Hip'],
-    'Trunk': ['Trunk']  # 단일 관절은 리스트에 하나만 포함
+    'Trunk': ['Trunk']
 }
 
 def calculate_rmse(true_values, predicted_values):
     """Calculate Root Mean Square Error between two arrays"""
     return np.sqrt(np.mean((true_values - predicted_values)**2))
 
-def process_trial_rmse(file_path, joint='Ankle', coordinate='X'):
-    """Process trial file to calculate RMSE between averaged marker-based and markerless data for paired joints"""
+def process_trial_waveforms(file_path, joint='Ankle', coordinate='X'):
+    """Process trial file to get averaged marker-based and markerless waveforms for paired joints"""
     paired_joints = JOINT_PAIRS.get(joint, [])
     if not paired_joints:
         raise ValueError(f"Unsupported joint: {joint}")
@@ -27,7 +28,6 @@ def process_trial_rmse(file_path, joint='Ankle', coordinate='X'):
     mb_waves = []
     ml_waves = []
     
-    # 좌우 관절 데이터 로드
     for j in paired_joints:
         try:
             mb_wave, ml_wave = get_waveforms(file_path, j, coordinate)
@@ -35,174 +35,208 @@ def process_trial_rmse(file_path, joint='Ankle', coordinate='X'):
             ml_waves.append(ml_wave)
         except Exception as e:
             print(f"Error loading {j} from {file_path}: {e}")
-            return None
+            return None, None
     
-    # 데이터 길이 맞추기 (최소 길이 기준)
     min_length = min(len(wave) for wave in mb_waves + ml_waves)
     mb_waves = [wave[:min_length] for wave in mb_waves]
     ml_waves = [wave[:min_length] for wave in ml_waves]
     
-    # 좌우 데이터 평균화
     mb_avg = np.mean(mb_waves, axis=0)
     ml_avg = np.mean(ml_waves, axis=0)
     
-    # 평균화된 데이터로 RMSE 계산
-    return calculate_rmse(mb_avg, ml_avg)
+    return mb_avg, ml_avg
 
-def aggregate_rmse(parent_folder, 
-                  joints=['Ankle', 'Knee', 'Hip', 'Trunk'], 
-                  axes=['X', 'Y', 'Z']):
-    """Aggregate RMSE values across all trials and joints"""
+def apply_iqr_rule(data):
+    """
+    IQR 2.0 rule을 적용하여 이상치를 식별합니다.
+    data: 2D numpy array (trials x segments)
+    return: 정상 데이터, 이상치 마스크
+    """
+    if len(data) == 0:
+        return data, np.array([])
+    
+    # 각 trial의 모든 segment RMSE를 일렬로 나열
+    flattened_data = data.flatten()
+    
+    # IQR 계산
+    q1 = np.percentile(flattened_data, 25)
+    q3 = np.percentile(flattened_data, 75)
+    iqr = q3 - q1
+    
+    # 경계값 계산
+    lower_bound = q1 - 2.0 * iqr
+    upper_bound = q3 + 2.0 * iqr
+    
+    # 이상치 마스크 생성
+    outlier_mask = (data < lower_bound) | (data > upper_bound)
+    inlier_data = np.where(outlier_mask, np.nan, data)
+    
+    return inlier_data, outlier_mask
+
+def calculate_segment_rmse(mb_wave, ml_wave, segment_size=10):
+    """Calculate RMSE for each segment (10 frames)"""
+    if len(mb_wave) != 101 or len(ml_wave) != 101:
+        raise ValueError("입력 데이터는 반드시 101개 프레임이어야 합니다.")
+    rmse_segments = []
+    for i in range(0, 100, segment_size):
+        start = i + 1
+        end = i + segment_size + 1
+        segment_rmse = calculate_rmse(mb_wave[start:end], ml_wave[start:end])
+        rmse_segments.append(segment_rmse)
+    return rmse_segments
+
+def perform_statistical_test(rmse_data, alpha=0.05):
+    """Perform t-test for each segment to identify significant differences"""
+    significant_segments = []
+    for segment_idx in range(rmse_data.shape[1]):
+        segment_rmse = rmse_data[:, segment_idx]
+        segment_rmse = segment_rmse[~np.isnan(segment_rmse)]  # NaN 제거 (이상치 제외)
+        if len(segment_rmse) > 1:  # 통계 검정을 위해 데이터가 충분해야 함
+            t_stat, p_val = stats.ttest_1samp(segment_rmse, popmean=0, nan_policy='omit')
+            if p_val < alpha:
+                significant_segments.append(segment_idx)
+    return significant_segments
+
+def aggregate_segment_rmse(parent_folder, joints=['Ankle', 'Knee', 'Hip', 'Trunk'], axes=['X', 'Y', 'Z']):
+    """Aggregate segment-wise RMSE values across all trials, grouped by motion"""
     trial_files = glob.glob(os.path.join(parent_folder, '*', '*', '*.xlsx'))
     
-    records = []
+    all_rmse = {}
+    raw_rmse = {}  # 이상치 포함 원본 데이터 저장
     
     for file in trial_files:
         subject, motion = extract_subject_motion(file)
+        if motion not in all_rmse:
+            all_rmse[motion] = {joint: {axis: [] for axis in axes} for joint in joints}
+            raw_rmse[motion] = {joint: {axis: [] for axis in axes} for joint in joints}
+        
         for joint in joints:
             for axis in axes:
                 try:
-                    rmse_value = process_trial_rmse(file, joint, axis)
-                    if rmse_value is not None:
-                        records.append({
-                            'subject': subject,
-                            'motion': motion,
-                            'joint': joint,  # 평균화된 관절 이름 사용
-                            'axis': axis,
-                            'rmse': rmse_value
-                        })
+                    mb_wave, ml_wave = process_trial_waveforms(file, joint, axis)
+                    if mb_wave is not None and ml_wave is not None:
+                        rmse_segments = calculate_segment_rmse(mb_wave, ml_wave)
+                        all_rmse[motion][joint][axis].append(rmse_segments)
+                        raw_rmse[motion][joint][axis].append(rmse_segments)
                 except Exception as e:
                     print(f"Error processing {file} (joint: {joint}, axis: {axis}): {e}")
     
-    return pd.DataFrame(records)
+    # IQR 적용 및 이상치 제거
+    for motion in all_rmse:
+        for joint in joints:
+            for axis in axes:
+                if all_rmse[motion][joint][axis]:
+                    data = np.array(all_rmse[motion][joint][axis])
+                    inlier_data, outlier_mask = apply_iqr_rule(data)
+                    all_rmse[motion][joint][axis] = inlier_data
+                    raw_rmse[motion][joint][axis] = np.array(raw_rmse[motion][joint][axis])
+    
+    return all_rmse, raw_rmse
 
-def identify_outliers_iqr(df, motion, threshold=2.0):
-    """Non-parametric outlier detection using interquartile range
+def plot_rmse(all_rmse, output_dir, joints=['Ankle', 'Knee', 'Hip', 'Trunk'], axes=['X', 'Y', 'Z'], alpha=0.05):
+    """Plot average RMSE with error bars for each motion, and save all graphs"""
+    rmse_data_list = []
     
-    Args:
-        df: DataFrame containing RMSE data
-        motion: Specific motion category to analyze
-        threshold: IQR multiplier (default=2)
+    for motion, motion_data in all_rmse.items():
+        for joint in joints:
+            for axis in axes:
+                rmse_data = motion_data[joint][axis]
+                if rmse_data.size == 0:
+                    continue
+                mean_rmse = np.nanmean(rmse_data, axis=0)
+                std_rmse = np.nanstd(rmse_data, axis=0)
+                segments = np.arange(0, 100, 10)
+                
+                # 통계적 유의미성 검정
+                significant_segments = perform_statistical_test(rmse_data, alpha=alpha)
+                
+                # 엑셀 데이터에 Motion 열 추가
+                for seg_idx, (seg, mean, std) in enumerate(zip(segments, mean_rmse, std_rmse)):
+                    rmse_data_list.append({
+                        'Motion': motion,
+                        'Joint': joint,
+                        'Axis': axis,
+                        'Segment': f'{seg}-{seg+10}%',
+                        'Mean_RMSE': mean,
+                        'Std_RMSE': std
+                    })
+                
+                plt.figure(figsize=(10, 6))
+                plt.errorbar(segments, mean_rmse, yerr=std_rmse, fmt='-o', capsize=5, label='Average RMSE ± Std')
+                
+                # 유의미한 구간 표시
+                for seg_idx in significant_segments:
+                    plt.scatter(segments[seg_idx], mean_rmse[seg_idx], color='red', marker='*', s=200, 
+                               label='Significant (p<0.05)' if seg_idx == significant_segments[0] else "")
+                
+                plt.xlabel('Phase (%)')
+                plt.ylabel('Average RMSE')
+                plt.title(f'Average RMSE for {motion} - {joint} - {axis} axis')
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+                
+                plot_filename = f'RMSE_{motion}_{joint}_{axis}.png'
+                plt.savefig(os.path.join(output_dir, plot_filename))
+                plt.close()
     
-    Returns:
-        Boolean Series indicating non-outlier values
-    """
-    motion_group = df[df['motion'] == motion]
-    
-    if len(motion_group) < 4:  # Require minimum 4 data points
-        return pd.Series([True]*len(df), index=df.index)
-    
-    Q1 = motion_group['rmse'].quantile(0.25)
-    Q3 = motion_group['rmse'].quantile(0.75)
-    IQR = Q3 - Q1
-    
-    lower_bound = Q1 - threshold * IQR
-    upper_bound = Q3 + threshold * IQR
-    
-    return df['rmse'].between(lower_bound, upper_bound, inclusive='both')
+    df = pd.DataFrame(rmse_data_list)
+    excel_path = os.path.join(output_dir, 'segment_wise_RMSE_by_motion.xlsx')
+    df.to_excel(excel_path, index=False)
+    return df
 
-def visualize_outliers(df, output_dir):
-    """Visualize RMSE distribution with outliers highlighted"""
-    plt.figure(figsize=(14, 8))
+def plot_rmse_outliers(raw_rmse, output_dir):
+    """모든 RMSE를 scatter plot으로 그리고 IQR에 의해 제거될 이상치는 빨간색으로 표시"""
+    plt.figure(figsize=(15, 8))
     
-    # Use strip plot with optimized parameters
-    ax = sns.stripplot(x='motion', y='rmse', hue='outlier', data=df,
-                      palette={True: 'red', False: 'blue'},
-                      size=3, jitter=0.3, alpha=0.7, 
-                      dodge=False, linewidth=0.3)
+    for motion in raw_rmse:
+        for joint in raw_rmse[motion]:
+            for axis in raw_rmse[motion][joint]:
+                if raw_rmse[motion][joint][axis].size > 0:
+                    data = raw_rmse[motion][joint][axis]
+                    original_data, outlier_mask = apply_iqr_rule(data)
+                    
+                    segments = np.arange(0, 100, 10)
+                    for seg_idx in range(len(segments)):
+                        seg_data = original_data[:, seg_idx]
+                        seg_mask = outlier_mask[:, seg_idx]
+                        
+                        # 정상 데이터 플롯 (파란색)
+                        normal_data = seg_data[~seg_mask]
+                        plt.scatter([segments[seg_idx]] * len(normal_data), normal_data, 
+                                  c='blue', alpha=0.5, s=30)
+                        
+                        # 이상치 플롯 (빨간색)
+                        outlier_data = seg_data[seg_mask]
+                        plt.scatter([segments[seg_idx]] * len(outlier_data), outlier_data, 
+                                  c='red', alpha=0.5, s=30)
     
-    # Add IQR box visualization
-    sns.boxplot(x='motion', y='rmse', data=df, showfliers=False,
-               boxprops={'facecolor':'None', 'linewidth': 1.2}, 
-               whiskerprops={'linewidth': 1.2},
-               ax=ax)
+    plt.xlabel('Gait Cycle (%)')
+    plt.ylabel('RMSE')
+    plt.title('RMSE Distribution with Outliers (Red)')
+    plt.grid(True, alpha=0.3)
     
-    plt.title('RMSE Distribution (IQR 3σ Rule)')
-    plt.xticks(rotation=45)
-    plt.ylabel('RMSE Value')
-    plt.xlabel('Motion Type')
-    plt.tight_layout()
+    plt.scatter([], [], c='blue', alpha=0.5, label='Normal Data')
+    plt.scatter([], [], c='red', alpha=0.5, label='Outliers')
+    plt.legend()
     
-    # Save and show
-    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-    plot_path = os.path.join(output_dir, f'outlier_visualization_{timestamp}.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    return plot_path
-
-def calculate_average_rmse(df):
-    """Calculate average RMSE values for each motion, joint, and axis combination after outlier removal"""
-    # Group by motion, joint, and axis to calculate mean and std
-    summary = df.groupby(['motion', 'joint', 'axis'])['rmse'].agg(['mean', 'std']).reset_index()
-    
-    # Format the results as "mean ± std" with 2 decimal places
-    summary['result'] = summary['mean'].round(2).astype(str) + ' ± ' + summary['std'].round(2).astype(str)
-    
-    # Create pivot tables for each motion
-    motion_tables = {}
-    for motion in summary['motion'].unique():
-        motion_data = summary[summary['motion'] == motion]
-        pivot = motion_data.pivot(index='joint', columns='axis', values='result')
-        motion_tables[motion] = pivot
-    
-    return motion_tables
+    plt.savefig(os.path.join(output_dir, 'rmse_outliers.png'), dpi=300, bbox_inches='tight')
+    plt.close()
 
 def main():
     try:
-        # Configure output paths
-        results_dir = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\results'
-        data_source = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\_normalized\merged_check_interpolated'
+        parent_folder = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\_normalized\merged_check_interpolated'
+        output_dir = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\results'
         
-        # Create results directory if needed
-        os.makedirs(results_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Generate timestamp for unique filename
-        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_file = os.path.join(results_dir, f'RMSE_Results_{timestamp}.xlsx')
+        all_rmse, raw_rmse = aggregate_segment_rmse(parent_folder)
         
-        # Aggregate RMSE values
-        df = aggregate_rmse(data_source)
+        df = plot_rmse(all_rmse, output_dir)
+        plot_rmse_outliers(raw_rmse, output_dir)
         
-        # Add outlier detection
-        df['outlier'] = False
-        for motion in df['motion'].unique():
-            motion_mask = df['motion'] == motion
-            is_outlier = ~identify_outliers_iqr(df, motion)
-            df.loc[motion_mask & is_outlier, 'outlier'] = True
-        
-        # Create cleaned dataset (non-outliers only)
-        clean_df = df[~df['outlier']].copy()
-        
-        # Calculate average RMSE values for each motion
-        motion_tables = calculate_average_rmse(clean_df)
-        
-        # Save to Excel with formatting
-        with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
-            # Save full data with outliers
-            df.to_excel(writer, index=False, sheet_name='All Data')
-            
-            # Save cleaned data
-            clean_df.to_excel(writer, index=False, sheet_name='Cleaned Data')
-            
-            # Save average RMSE values for each motion
-            for motion, pivot_table in motion_tables.items():
-                sheet_name = f'{motion} Summary'
-                pivot_table.to_excel(writer, sheet_name=sheet_name)
-            
-            workbook = writer.book
-            
-            # Format trial data sheets
-            for sheet_name in ['All Data', 'Cleaned Data']:
-                worksheet = writer.sheets[sheet_name]
-                worksheet.autofilter(0, 0, len(df), len(df.columns)-1)
-                num_format = workbook.add_format({'num_format': '0.000'})
-                worksheet.set_column('E:E', 12, num_format)  # RMSE column
-        
-        print(f"Successfully saved results to:\n{output_file}")
-        
-        # Generate outlier visualization
-        plot_path = visualize_outliers(df, results_dir)
-        print(f"Generated visualization:\n{plot_path}")
+        print(f"Results have been saved to {output_dir}")
+        print(f"Excel file has been saved as: {os.path.join(output_dir, 'segment_wise_RMSE_by_motion.xlsx')}")
     
     except Exception as e:
         print(f"Error processing data: {e}")
