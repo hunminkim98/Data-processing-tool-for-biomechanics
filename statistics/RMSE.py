@@ -6,17 +6,51 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# 좌우 관절 매핑 정의
+JOINT_PAIRS = {
+    'Ankle': ['Left_Ankle', 'Right_Ankle'],
+    'Knee': ['Left_Knee', 'Right_Knee'],
+    'Hip': ['Left_Hip', 'Right_Hip'],
+    'Trunk': ['Trunk']  # 단일 관절은 리스트에 하나만 포함
+}
+
 def calculate_rmse(true_values, predicted_values):
     """Calculate Root Mean Square Error between two arrays"""
     return np.sqrt(np.mean((true_values - predicted_values)**2))
 
 def process_trial_rmse(file_path, joint='Ankle', coordinate='X'):
-    """Process trial file to calculate RMSE between marker-based and markerless data"""
-    mb_wave, ml_wave = get_waveforms(file_path, joint, coordinate)
-    return calculate_rmse(mb_wave, ml_wave)
+    """Process trial file to calculate RMSE between averaged marker-based and markerless data for paired joints"""
+    paired_joints = JOINT_PAIRS.get(joint, [])
+    if not paired_joints:
+        raise ValueError(f"Unsupported joint: {joint}")
+    
+    mb_waves = []
+    ml_waves = []
+    
+    # 좌우 관절 데이터 로드
+    for j in paired_joints:
+        try:
+            mb_wave, ml_wave = get_waveforms(file_path, j, coordinate)
+            mb_waves.append(mb_wave)
+            ml_waves.append(ml_wave)
+        except Exception as e:
+            print(f"Error loading {j} from {file_path}: {e}")
+            return None
+    
+    # 데이터 길이 맞추기 (최소 길이 기준)
+    min_length = min(len(wave) for wave in mb_waves + ml_waves)
+    mb_waves = [wave[:min_length] for wave in mb_waves]
+    ml_waves = [wave[:min_length] for wave in ml_waves]
+    
+    # 좌우 데이터 평균화
+    mb_avg = np.mean(mb_waves, axis=0)
+    ml_avg = np.mean(ml_waves, axis=0)
+    
+    # 평균화된 데이터로 RMSE 계산
+    return calculate_rmse(mb_avg, ml_avg)
 
 def aggregate_rmse(parent_folder, 
-                  joints=['Left_Ankle', 'Left_Hip', 'Left_Knee', 'Right_Ankle', 'Right_Hip', 'Right_Knee', 'Trunk'], 
+                  joints=['Ankle', 'Knee', 'Hip', 'Trunk'], 
                   axes=['X', 'Y', 'Z']):
     """Aggregate RMSE values across all trials and joints"""
     trial_files = glob.glob(os.path.join(parent_folder, '*', '*', '*.xlsx'))
@@ -29,25 +63,26 @@ def aggregate_rmse(parent_folder,
             for axis in axes:
                 try:
                     rmse_value = process_trial_rmse(file, joint, axis)
-                    records.append({
-                        'subject': subject,
-                        'motion': motion,
-                        'joint': joint,
-                        'axis': axis,
-                        'rmse': rmse_value
-                    })
+                    if rmse_value is not None:
+                        records.append({
+                            'subject': subject,
+                            'motion': motion,
+                            'joint': joint,  # 평균화된 관절 이름 사용
+                            'axis': axis,
+                            'rmse': rmse_value
+                        })
                 except Exception as e:
                     print(f"Error processing {file} (joint: {joint}, axis: {axis}): {e}")
     
     return pd.DataFrame(records)
 
-def identify_outliers_iqr(df, motion, threshold=3.0):
+def identify_outliers_iqr(df, motion, threshold=2.0):
     """Non-parametric outlier detection using interquartile range
     
     Args:
         df: DataFrame containing RMSE data
         motion: Specific motion category to analyze
-        threshold: IQR multiplier (default=3)
+        threshold: IQR multiplier (default=2)
     
     Returns:
         Boolean Series indicating non-outlier values
@@ -116,7 +151,7 @@ def main():
     try:
         # Configure output paths
         results_dir = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\results'
-        data_source = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\CMC\merged_check'
+        data_source = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\_normalized\merged_check_interpolated'
         
         # Create results directory if needed
         os.makedirs(results_dir, exist_ok=True)

@@ -42,8 +42,14 @@ def get_waveforms(file_path, joint='Ankle', coordinate='X', SPM=False, filtering
     """
     subject, motion = extract_subject_motion(file_path)
     
-    if subject == "성기훈" and any(kw in joint for kw in ["Knee", "Ankle"]):
-        raise ValueError(f"Excluding {joint} {coordinate}-axis data for subject 성기훈")
+    # R과 동일한 제외 기준 적용
+    if subject == "성기훈" and motion == "swing" and joint == "Left_Knee":
+        raise ValueError(f"Excluding {joint} {coordinate}-axis data for subject 성기훈 in swing motion")
+    # 추가 제외 조건 (김리언, 김태형)
+    if subject == "김리언" and motion == "swing" and "Ankle" in joint:
+        raise ValueError(f"Excluding {joint} {coordinate}-axis data for subject 김리언 in swing motion")
+    if subject == "김태형" and motion == "swing" and "Trunk" in joint:
+        raise ValueError(f"Excluding {joint} {coordinate}-axis data for subject 김태형 in swing motion")
     
     sheet_idx = JOINT_SHEET_MAPPING.get(joint)
     if sheet_idx is None:
