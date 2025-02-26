@@ -157,13 +157,14 @@ def aggregate_CMC(parent_folder,
                   axes=['X', 'Y', 'Z']):
     """
     모든 trials의 웨이브폰을 통합하여 CMC 계산
+    모션별, 관절별로 X, Y, Z 축에 대한 CMC를 계산하고, 왼쪽과 오른쪽 관절의 평균을 구함
     """
     trial_files = glob.glob(os.path.join(parent_folder, '*', '*', '*.xlsx'))
     print(f"Found {len(trial_files)} trial files in '{parent_folder}'.")
     
     records = []
     
-    # 관절별/축별로 모든 trials의 웨이브폰 수집
+    # 모션별/관절별/축별로 모든 trials의 웨이브폰 수집
     waveform_dict = defaultdict(list)
     
     for file in trial_files:
@@ -173,14 +174,15 @@ def aggregate_CMC(parent_folder,
                 try:
                     mb_wave, ml_wave = get_waveforms(file, joint, axis)
                     combined_wave = np.vstack([mb_wave, ml_wave])
-                    waveform_dict[(joint, axis)].append(combined_wave)
+                    # 모션 정보를 키에 추가
+                    waveform_dict[(motion, joint, axis)].append(combined_wave)
                 except Exception as e:
                     print(f"Error processing {file} (joint: {joint}, axis: {axis}): {e}")
     
     # 통합 웨이브폰으로 CMC 계산
-    for (joint, axis), waveforms in waveform_dict.items():
+    for (motion, joint, axis), waveforms in waveform_dict.items():
         if len(waveforms) < 2:
-            print(f"Warning: Insufficient waveforms for {joint}-{axis} (n={len(waveforms)})")
+            print(f"Warning: Insufficient waveforms for {motion}-{joint}-{axis} (n={len(waveforms)})")
             continue
             
         try:
@@ -191,30 +193,80 @@ def aggregate_CMC(parent_folder,
             cmc_val = cmc_val.real if isinstance(cmc_val, complex) else cmc_val
             
             records.append({
+                'motion': motion,
                 'joint': joint,
                 'axis': axis,
                 'num_trials': len(waveforms),
                 'cmc': cmc_val
             })
         except Exception as e:
-            print(f"Error calculating CMC for {joint}-{axis}: {e}")
+            print(f"Error calculating CMC for {motion}-{joint}-{axis}: {e}")
     
-    return pd.DataFrame(records)
+    # 결과를 DataFrame으로 변환
+    df = pd.DataFrame(records)
+    
+    # 왼쪽/오른쪽 관절 평균 계산을 위한 처리
+    if not df.empty:
+        # 'Left_'와 'Right_'로 시작하는 관절 이름 추출
+        joint_pairs = {}
+        for joint in df['joint'].unique():
+            if joint.startswith('Left_'):
+                right_joint = 'Right_' + joint[5:]
+                if right_joint in df['joint'].unique():
+                    joint_pairs[joint] = right_joint
+        
+        # 왼쪽/오른쪽 관절 평균 계산
+        avg_records = []
+        for motion in df['motion'].unique():
+            for axis in df['axis'].unique():
+                for left_joint, right_joint in joint_pairs.items():
+                    # 해당 모션, 축에 대한 왼쪽/오른쪽 관절 데이터 필터링
+                    left_data = df[(df['motion'] == motion) & (df['joint'] == left_joint) & (df['axis'] == axis)]
+                    right_data = df[(df['motion'] == motion) & (df['joint'] == right_joint) & (df['axis'] == axis)]
+                    
+                    if not left_data.empty and not right_data.empty:
+                        # 관절 이름에서 'Left_' 부분 제거하여 기본 관절 이름 추출 (예: 'Left_Ankle' -> 'Ankle')
+                        base_joint = left_joint[5:]
+                        
+                        # 왼쪽/오른쪽 CMC 평균 계산
+                        avg_cmc = (left_data['cmc'].values[0] + right_data['cmc'].values[0]) / 2
+                        avg_trials = left_data['num_trials'].values[0] + right_data['num_trials'].values[0]
+                        
+                        avg_records.append({
+                            'motion': motion,
+                            'joint': f'Avg_{base_joint}',
+                            'axis': axis,
+                            'num_trials': avg_trials,
+                            'cmc': avg_cmc
+                        })
+        
+        # 평균 레코드를 원래 DataFrame에 추가
+        if avg_records:
+            df = pd.concat([df, pd.DataFrame(avg_records)], ignore_index=True)
+    
+    return df
 
 def plot_aggregate_CMC(df):
     """
-    시각화 함수 수정
+    시각화 함수 수정 - 모션별로 구분하여 시각화
     """
-    plt.figure(figsize=(12, 6))
-    sns.boxplot(x='joint', y='cmc', hue='axis', data=df)
-    plt.title("CMC Distribution by Joint and Axis")
-    plt.ylabel("CMC Value")
-    plt.legend(title='Axis')
-    plt.show()
+    # 모션별로 그래프 생성
+    for motion in df['motion'].unique():
+        motion_df = df[df['motion'] == motion]
+        
+        plt.figure(figsize=(14, 8))
+        sns.boxplot(x='joint', y='cmc', hue='axis', data=motion_df)
+        plt.title(f"CMC Distribution by Joint and Axis for Motion: {motion}")
+        plt.ylabel("CMC Value")
+        plt.xlabel("Joint")
+        plt.legend(title='Axis')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
 
 def main():
     # Specify the parent folder path (multiple subject folders exist under this path)
-    parent_folder = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\CMC\merged_check'
+    parent_folder = r'C:\Users\5W555A\Desktop\Data-processing-tool-for-biomechanics\statistics\CMC\merged_check_interpolated'
     
     do_visualization = True
     do_aggregate = True
@@ -225,14 +277,14 @@ def main():
         print(df_cmc)
         
         if not df_cmc.empty:
-            # 새로운 요약 방식으로 변경
-            joint_axis_summary = df_cmc.groupby(['joint', 'axis']).agg(
+            # 모션별, 관절별, 축별 요약
+            joint_axis_summary = df_cmc.groupby(['motion', 'joint', 'axis']).agg(
                 mean_cmc=('cmc', 'mean'),
                 std_cmc=('cmc', 'std'),
                 trial_count=('num_trials', 'sum')
             ).reset_index()
             
-            print("\nAverage CMC by Joint and Axis:")
+            print("\nAverage CMC by Motion, Joint and Axis:")
             print(joint_axis_summary)
             
             # Excel 저장 부분도 수정
@@ -243,15 +295,18 @@ def main():
                 
                 # 컬럼 너비 조정
                 worksheet = writer.sheets['Combined Analysis']
-                worksheet.set_column('A:A', 15)  # joint
-                worksheet.set_column('B:B', 10)  # axis
-                worksheet.set_column('C:C', 12)  # num_trials
-                worksheet.set_column('D:D', 10)  # cmc
+                worksheet.set_column('A:A', 15)  # motion
+                worksheet.set_column('B:B', 15)  # joint
+                worksheet.set_column('C:C', 10)  # axis
+                worksheet.set_column('D:D', 12)  # num_trials
+                worksheet.set_column('E:E', 10)  # cmc
                 
-                writer.sheets['Summary'].set_column('A:B', 15)
-                writer.sheets['Summary'].set_column('C:E', 12)
+                writer.sheets['Summary'].set_column('A:A', 15)  # motion
+                writer.sheets['Summary'].set_column('B:B', 15)  # joint
+                writer.sheets['Summary'].set_column('C:C', 10)  # axis
+                writer.sheets['Summary'].set_column('D:F', 12)  # statistics
             
-            plot_aggregate_CMC(df_cmc)  # 이 함수도 수정 필요
+            plot_aggregate_CMC(df_cmc)
         else:
             print("No trial files available for aggregation.")
     
