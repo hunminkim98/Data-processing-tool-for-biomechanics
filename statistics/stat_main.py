@@ -287,6 +287,14 @@ def main():
             print("\nAverage CMC by Motion, Joint and Axis:")
             print(joint_axis_summary)
             
+            # Calculate std_dev and add it to df_cmc for individual trials
+            # First, group the data to calculate std_dev
+            std_dev_by_group = df_cmc.groupby(['motion', 'joint', 'axis'])['cmc'].std().reset_index()
+            std_dev_by_group.rename(columns={'cmc': 'std_dev'}, inplace=True)
+            
+            # Merge the std_dev back to the original DataFrame
+            df_cmc = pd.merge(df_cmc, std_dev_by_group, on=['motion', 'joint', 'axis'], how='left')
+            
             # Excel 저장 부분도 수정
             output_excel_path = os.path.join(os.path.dirname(parent_folder), "cmc_aggregated_results.xlsx")
             with pd.ExcelWriter(output_excel_path, engine='xlsxwriter') as writer:
@@ -300,6 +308,7 @@ def main():
                 worksheet.set_column('C:C', 10)  # axis
                 worksheet.set_column('D:D', 12)  # num_trials
                 worksheet.set_column('E:E', 10)  # cmc
+                worksheet.set_column('F:F', 10)  # std_dev
                 
                 writer.sheets['Summary'].set_column('A:A', 15)  # motion
                 writer.sheets['Summary'].set_column('B:B', 15)  # joint
