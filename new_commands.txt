@@ -1,0 +1,1 @@
+python -m json_display_without_img -j D:\석사\석사4차\thesis\Pose2Sim-with-various-beta-features\Pose2Sim\Demo_SinglePerson\pose\Post1_cam1_json -W 4000 -H 3000 -f 120
